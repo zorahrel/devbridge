@@ -1,73 +1,120 @@
 # Dev Bridge
 
-Server MCP locale che dà alla **chat** di ChatGPT (non a Codex) gli strumenti per lavorare sui
-progetti del Mac. Nasce per usare la quota chat quando quella Codex è finita: il modello ragiona
-in chat, il server esegue le operazioni sui file.
-
-## Tool
-
-`list_roots` · `list_dir` · `read_file` · `write_file` · `edit_file` · `search` · `find_files` ·
-`git` · `run_command`
-
-## Architettura
+**Give the ChatGPT chat the hands it is missing.** A local MCP server that lets the ChatGPT web
+chat read, write, run and test code on your machine, over your chat quota instead of a coding
+agent's.
 
 ```
-chat ChatGPT (server OpenAI) → tunnel cloudflare → http.mjs :8787 → server.mjs (stdio) → file
+ChatGPT chat  ──►  tunnel  ──►  devbridge  ──►  your files
+ (the brain)                   (the hands)
 ```
 
-La chat gira sui server OpenAI, quindi un MCP stdio locale non la raggiunge: serve un URL HTTPS
-pubblico. `server.mjs` resta il cuore stdio (usabile anche come plugin dell'app desktop);
-`http.mjs` lo espone su HTTP.
+The model already knows how to program. What it cannot do, from a browser tab, is open a file.
+That is the entire gap this closes, and it is smaller than it looks.
 
-## Sicurezza
+---
 
-- Solo le cartelle in `~/.config/devbridge/config.json` (`roots`). Fuori → errore.
-- `.env`, `*.pem`, `id_rsa*`, `auth.json`, `.ssh/` negati sempre, anche dentro i root.
-- `git push` e `git remote` bloccati: pubblicare resta una decisione umana.
-- Token in `~/.config/devbridge/token` (0600), passato nel path (`/mcp/<token>`) perché il form
-  connettori di ChatGPT non permette header custom senza OAuth. Senza token → 401.
+## Why
 
-## Uso quotidiano
+Coding agents bill separately from chat. When the coding quota runs out mid-week, the chat is
+still there, still capable, and completely blind to your disk. Copy-pasting files into a text box
+is not a workflow.
 
-Parte da solo al login (`~/Library/LaunchAgents/com.jarvis.devbridge.plist`). Niente da fare.
+Dev Bridge hands it twelve tools and a fence.
+
+## What it can actually do
+
+Not a toy. Measured on a real monorepo (91 source files, pnpm workspaces, four TypeScript
+projects, 30+ Playwright checks):
+
+| Task | Result |
+|---|---|
+| Read a 3,036-line file, name the exported class and its main method | `RigDriver`, `apply(dt, active)` at line 888. Verified exact. |
+| Count files importing shared modules | 9 of 10. Off by one, and it explained why: no literal `shared/...` imports, only relative paths. |
+| Start a dev server, run a 136s Playwright suite against it, stop it | Passed, without touching the terminal. |
+| Edit `package.json`, then prove nothing broke | `engines` added, `pnpm typecheck` exit 0. |
+| Build a calculator from scratch and verify it | 461 lines, 6/6 functional tests green. |
+
+It also found a bug in this project. Investigating why a suite failed with
+`WebSocket is not defined`, it traced the cause to a Node version mismatch that came from *my*
+`PATH` handling. That fix is in the history.
+
+## Install
+
+Requires Node 20+ and a ChatGPT account with developer mode enabled.
 
 ```bash
-tail -f ~/jarvis/mcp-devbridge/logs/agent.log   # stato
-cat ~/jarvis/mcp-devbridge/logs/current-url.txt # URL corrente
-launchctl kickstart -k gui/501/com.jarvis.devbridge  # riavvio
+git clone https://github.com/zorahrel/devbridge.git ~/devbridge
+cd ~/devbridge
+cp config.example.json ~/.config/devbridge/config.json   # list your project folders here
+./run.sh                                                  # prints the URL to paste into ChatGPT
 ```
 
-In chat basta nominarlo: «con Dev Bridge, apri X e correggi Y».
+Paste that URL into **ChatGPT → Settings → Apps → Create app**, auth *None*. Done.
 
-## L'URL cambia a ogni avvio
+For unattended use, `install-agent.sh` sets up a launchd agent that starts everything at login and
+keeps the ChatGPT app pointed at the current tunnel by itself.
 
-Il tunnel gratuito `trycloudflare` assegna un hostname nuovo ogni volta, e l'API dei connettori
-non ha un PATCH. `sync-connector.mjs` quindi **cancella e ricrea** l'app a ogni avvio, via API:
+## The tools
 
-1. `POST /backend-api/aip/connectors/mcp` — se risponde 409, il body contiene
-   `existing_connector_id`: si cancella quello e si riprova.
-2. `POST /backend-api/aip/connectors/links/noauth` con `action_names` — **questo passo è
-   obbligatorio**: senza il "link" l'app risulta installata ma la chat risponde «non espone
-   comandi utilizzabili».
+**Read** `list_roots` `list_dir` `read_file` `search` `find_files`
+**Write** `write_file` `edit_file` `git`
+**Run** `run_command` `run_background` `read_output` `stop_background`
 
-Serve Chrome sulla porta CDP 19223 con la sessione ChatGPT loggata (profilo
-`~/.cache/cdp-mcp/skill-profile`): il token di sessione si legge da lì.
+`run_background` exists because a dev server does not fit inside a request. Long-lived processes
+get detached, followed with `read_output`, and closed with `stop_background`.
 
-Per un URL stabile servirebbe un dominio su Cloudflare (`cloudflared tunnel route dns`) oppure
-il tunnel nativo OpenAI, che sta su platform.openai.com ed è legato all'org API.
+## The fence
 
-## File
+The model is a guest on your machine, not the owner.
 
-| file | ruolo |
-|---|---|
-| `server.mjs` | MCP stdio, i 9 tool, la sandbox |
-| `http.mjs` | transport HTTP + auth, riusa `server.mjs` come child |
-| `run.sh` | avvio foreground per launchd: http + tunnel + sync |
-| `sync-connector.mjs` | riallinea l'app ChatGPT all'URL corrente |
-| `.codex-plugin/` | manifest per installarlo come plugin dell'app desktop |
+- **Whitelisted roots only.** Everything outside the folders you list is refused, symlinks
+  resolved before the check.
+- **Secrets are never readable**, not even inside an allowed root: `.env*`, `*.pem`, `id_rsa*`,
+  `auth.json`, anything under `.ssh/`.
+- **No `git push`, no `git remote`.** Publishing stays a human decision.
+- **Bearer token**, 0600 on disk. No token, no answer.
+- Only `run_command` is marked destructive, so that is the only prompt you see. A confirmation
+  dialog you dismiss on every single call is not a safety feature, it is furniture.
 
-## Nota sull'app desktop
+## Three things that cost a day to learn
 
-`server.mjs` è installato anche come plugin Codex (`codex plugin list` → `devbridge@local`).
-Lì funziona da subito senza tunnel, ma serve la quota **Codex**, che è il problema di partenza.
-Il percorso HTTP è quello che usa la quota **chat**.
+**Creating the connector is not enough.** `POST /aip/connectors/mcp` returns 200, the app shows up
+installed, and the chat still answers *"Dev Bridge is installed but exposes no usable commands."*
+The missing step is `POST /aip/connectors/links/noauth` with the action names. It is what the
+**Connect** button does, and it is in no documentation. Found by sniffing the UI's own traffic.
+
+**`bash -lc` overwrites your PATH.** Passing `PATH` in the child environment does nothing: the
+login shell sources your profile *after* and puts its own directories first. On this machine that
+meant Node 18 instead of 25, and every suite using the global `WebSocket` died. The PATH has to be
+re-exported inside the command.
+
+**Reasoning Pro does not call tools.** The first real task failed silently this way: the model
+wrote the whole file, described it in detail, and saved nothing. The strongest mode is the one
+mode this cannot use.
+
+## Limits, honestly
+
+This is not a coding agent, and pretending otherwise wastes your afternoon.
+
+- **One turn, one answer.** No autonomous loop. A large task means you splitting it up.
+- **No project memory.** Every turn starts cold.
+- **Free tunnels rotate.** `trycloudflare` hands out a new hostname each boot and the connector
+  API has no PATCH, so the app is deleted and recreated on every start. Automatic, but it needs a
+  logged-in browser session. A custom domain removes this entirely.
+
+Good for: a bug, a file, a contained refactor, an investigation.
+Bad for: anything you would leave running unattended.
+
+## How it works
+
+`server.mjs` is a dependency-free MCP server over stdio. `http.mjs` wraps it in Streamable HTTP so
+a remote model can reach it. `sync-connector.mjs` re-registers the app after each restart, driving
+the ChatGPT backend API through an authenticated browser tab.
+
+The stdio core also installs as a desktop-app plugin, no tunnel involved, if you have coding
+quota to spend.
+
+## License
+
+MIT.

@@ -1,0 +1,6 @@
+{
+  "roots": ["~/Projects", "~/Sites"],
+  "maxReadBytes": 400000,
+  "execTimeoutMs": 180000,
+  "allowExec": true
+}
