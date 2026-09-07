@@ -115,7 +115,7 @@ const tools = {
 
   stop_background: {
     description: 'Ferma un processo avviato con run_background. Senza nome, elenca quelli attivi.',
-    annotations: { title: 'Ferma processo', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    annotations: { title: 'Ferma processo', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: { type: 'object', properties: { name: { type: 'string' } } },
     handler: async ({ name }) => {
       if (!name) return [...jobs.entries()].map(([k, j]) => `${k} pid=${j.pid} ${j.command}`).join('\n') || 'nessun processo attivo';
@@ -192,7 +192,7 @@ const tools = {
       properties: { path: { type: 'string' }, content: { type: 'string' } },
       required: ['path', 'content'],
     },
-    annotations: { title: 'Scrivi file', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    annotations: { title: 'Scrivi file', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     handler: async ({ path: p, content }) => {
       const f = resolveInRoot(p);
       await fsp.mkdir(path.dirname(f), { recursive: true });
