@@ -79,7 +79,7 @@ const tools = {
       if (jobs.has(key)) throw new Error(`Esiste gia un processo "${key}". Fermalo con stop_background o usa un altro nome.`);
       const out = path.join(os.tmpdir(), `devbridge-${key}-${Date.now()}.log`);
       const fd = fs.openSync(out, 'w');
-      const child = spawn('/bin/bash', ['-lc', command], {
+      const child = spawn('/bin/bash', ['-lc', `export PATH="${SAFE_PATH}"; ${command}`], {
         cwd: dir, detached: true, stdio: ['ignore', fd, fd],
         env: { ...process.env, PATH: SAFE_PATH },
       });
@@ -304,22 +304,24 @@ const tools = {
   },
 
   run_command: {
-    description: 'Esegue un comando shell nel progetto (test, build, lint). Timeout 3 minuti. Restituisce exit code, stdout, stderr.',
+    description: 'Esegue un comando shell nel progetto (test, build, lint) e aspetta che finisca. '
+      + 'Default 180s: per build o suite piu lunghe alza timeout_sec. Per cio che non finisce da solo (dev server, watch) usa run_background.',
     inputSchema: {
       type: 'object',
       properties: {
-        command: { type: 'string', description: 'Comando completo, es. "npm test"' },
+        command: { type: 'string', description: 'Comando completo, es. "pnpm test"' },
         cwd: { type: 'string' },
+        timeout_sec: { type: 'integer', description: 'Timeout in secondi (default 180, max 900).' },
       },
       required: ['command', 'cwd'],
     },
     annotations: { title: 'Esegui comando', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
-    handler: async ({ command, cwd }) => {
+    handler: async ({ command, cwd, timeout_sec }) => {
       if (!CFG.allowExec) throw new Error('run_command disabilitato nella config.');
       const dir = resolveInRoot(cwd);
       const env = { ...process.env, PATH: SAFE_PATH };
       try {
-        const { stdout, stderr } = await execFileP('/bin/bash', ['-lc', command], {
+        const { stdout, stderr } = await execFileP('/bin/bash', ['-lc', `export PATH="${SAFE_PATH}"; ${command}`], {
           cwd: dir, env, maxBuffer: 8e6,
           timeout: Math.min((timeout_sec ? timeout_sec * 1000 : CFG.execTimeoutMs), 900_000),
         });
@@ -327,7 +329,7 @@ const tools = {
       } catch (e) {
         const why = e.killed || e.signal === 'SIGTERM'
           ? `TIMEOUT dopo ${Math.min((timeout_sec ? timeout_sec : CFG.execTimeoutMs / 1000), 900)}s. Rilancia con timeout_sec piu alto, o avvia in background con run_background.`
-          : `exit=${e.code}`;
+          : `exit=${e.code ?? '?'} ${e.message ? '(' + e.message.split('\n')[0].slice(0, 200) + ')' : ''}`;
         return `${why}\n--- stdout\n${(e.stdout || '').slice(-30_000)}\n--- stderr\n${(e.stderr || '').slice(-20_000)}`;
       }
     },
