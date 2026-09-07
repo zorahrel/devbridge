@@ -9,6 +9,8 @@ import os from 'node:os';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
+import { taskTools, load as loadTask } from './tools-task.mjs';
+
 const execFileP = promisify(execFile);
 
 // PATH esplicito: il client passa un ambiente minimale e pnpm/npx non troverebbero node
@@ -60,6 +62,7 @@ function resolveInRoot(p) {
 // ---------- tools ----------
 
 const tools = {
+  ...taskTools,
   run_background: {
     description: 'Avvia un processo lungo in background (dev server, watch, suite di test) e torna subito con un id. '
       + 'Usa read_output per leggerne l output e stop_background per fermarlo. Serve per tutto cio che non finisce da solo.',
@@ -228,6 +231,29 @@ const tools = {
     },
   },
 
+  append_file: {
+    description: 'Aggiunge testo in fondo a un file (lo crea se manca). Serve per costruire un file grande '
+      + 'in piu chiamate: un file da 50KB non entra in una sola risposta. Scrivi la prima parte con write_file, '
+      + 'poi continua con append_file finche non e completo.',
+    annotations: { title: 'Aggiungi in fondo al file', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        content: { type: 'string' },
+      },
+      required: ['path', 'content'],
+    },
+    handler: async ({ path: p, content }) => {
+      const f = resolveInRoot(p);
+      await fsp.mkdir(path.dirname(f), { recursive: true });
+      await fsp.appendFile(f, content, 'utf8');
+      const st = await fsp.stat(f);
+      const righe = (await fsp.readFile(f, 'utf8')).split('\n').length;
+      return `aggiunti ${Buffer.byteLength(content)} byte a ${f} (ora ${st.size} byte, ${righe} righe)`;
+    },
+  },
+
   search: {
     description: 'Cerca un pattern regex nei file (ripgrep). Restituisce file:riga:testo.',
     inputSchema: {
@@ -364,9 +390,19 @@ async function handle(msg) {
         capabilities: { tools: { listChanged: false } },
         serverInfo: SERVER_INFO,
         instructions:
-          'devbridge da accesso ai file locali dei progetti. Chiama list_roots per vedere le cartelle disponibili, '
-          + 'poi list_dir/read_file/search per orientarti e edit_file/write_file per modificare. '
-          + 'run_command per test e build. Lavora sempre con percorsi assoluti.',
+          'devbridge da accesso ai file locali dei progetti. list_roots per vedere le cartelle, '
+          + 'list_dir/read_file/search per orientarti, edit_file/write_file per modificare, '
+          + 'run_command per test e build, run_background per cio che non finisce da solo. '
+          + 'Percorsi sempre assoluti.\n\n'
+          + 'LAVORO SU PIU MESSAGGI. Non ricordi i turni precedenti, ma il piano su disco si. '
+          + 'Chiama SEMPRE task_status come prima cosa: ti dice a che punto eri. '
+          + 'Se il lavoro non sta in una risposta sola, apri task_start con obiettivo e passi, '
+          + 'poi fai UN passo per volta e chiudilo con task_step_done indicando la prova. '
+          + 'task_note per cio che ti servira dopo. task_done solo quando e verificato davvero. '
+          + 'Quando finisci un turno con passi ancora aperti, dillo esplicitamente: il lavoro riprende da li.\n\n'
+          + 'FILE GRANDI. Sopra le ~300 righe non provare a scrivere tutto in una risposta: '
+          + 'apri con write_file e prosegui con append_file, un pezzo per chiamata. '
+          + 'Un file troncato a meta costa piu di due chiamate in piu.',
       });
     case 'notifications/initialized':
     case 'initialized':
