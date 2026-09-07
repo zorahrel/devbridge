@@ -36,6 +36,16 @@ FULL="$URL/mcp/$TOK"
 echo "$FULL" > "$LOG/current-url.txt"
 echo "$(date '+%F %T') UP $FULL"
 
+# cloudflared stampa l'URL prima che il bordo Cloudflare lo serva davvero: senza questa
+# attesa il sync riceve 424 "Connection failed" e l'app resta puntata al vecchio tunnel
+for i in $(seq 1 30); do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 8 -X POST "$FULL" \
+    -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' 2>/dev/null)
+  [ "$code" = "200" ] && { echo "  tunnel raggiungibile dopo ${i}s"; break; }
+  sleep 1
+done
+
 # l'URL trycloudflare cambia a ogni avvio: riallinea l'app in ChatGPT
 "$NODE" "$DIR/sync-connector.mjs" "$FULL" 2>&1 | sed 's/^/  sync: /' || echo "  sync fallito (Chrome CDP spento?)"
 
