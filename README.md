@@ -89,9 +89,10 @@ login shell sources your profile *after* and puts its own directories first. On 
 meant Node 18 instead of 25, and every suite using the global `WebSocket` died. The PATH has to be
 re-exported inside the command.
 
-**Reasoning Pro does not call tools.** The first real task failed silently this way: the model
-wrote the whole file, described it in detail, and saved nothing. The strongest mode is the one
-mode this cannot use.
+**When the model says it has no tools, check your own logs first.** A task failed with *"Dev Bridge
+exposes no usable commands"* and I blamed the reasoning mode. Wrong: my sync had deleted the
+connector and failed to recreate it. The model was describing my bug accurately while I looked for
+one in the product. An honest error message deserves an honest reading.
 
 ## Limits, honestly
 
