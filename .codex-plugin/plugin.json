@@ -1,0 +1,23 @@
+{
+  "name": "devbridge",
+  "version": "0.1.0",
+  "description": "Accesso locale ai file di progetto: leggi, cerca, modifica, esegui test. Usalo quando l'utente chiede di lavorare sul suo codice.",
+  "author": { "name": "Attilio Cianci" },
+  "license": "MIT",
+  "keywords": ["files", "code", "local", "editor", "git"],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Dev Bridge",
+    "shortDescription": "Leggi e modifica i file dei tuoi progetti locali",
+    "longDescription": "Espone i progetti locali come strumenti: elenco cartelle, lettura file, ricerca regex, modifica puntuale, scrittura, comandi git e esecuzione di test/build. Limitato alle cartelle autorizzate in ~/.config/devbridge/config.json.",
+    "developerName": "Attilio Cianci",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write", "Interactive"],
+    "defaultPrompt": [
+      "Che progetti hai a disposizione?",
+      "Leggi il README di questo progetto e dimmi cosa fa",
+      "Correggi il bug in questo file"
+    ],
+    "brandColor": "#0EA5E9"
+  }
+}

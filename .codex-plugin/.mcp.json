@@ -1,0 +1,31 @@
+{
+  "mcpServers": {
+    "devbridge": {
+      "command": "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node",
+      "args": [
+        "/Users/zorahrel/jarvis/mcp-devbridge/server.mjs"
+      ],
+      "enabled": true,
+      "default_tools_approval_mode": "approve",
+      "tools": {
+        "write_file": {
+          "approval_mode": "prompt"
+        },
+        "edit_file": {
+          "approval_mode": "prompt"
+        },
+        "run_command": {
+          "approval_mode": "prompt"
+        },
+        "git": {
+          "approval_mode": "prompt"
+        }
+      },
+      "env": {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+      },
+      "startup_timeout_sec": 15,
+      "tool_timeout_sec": 600
+    }
+  }
+}
