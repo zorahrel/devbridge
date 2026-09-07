@@ -6,10 +6,17 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileP = promisify(execFile);
+
+// PATH esplicito: il client passa un ambiente minimale e pnpm/npx non troverebbero node
+const SAFE_PATH = `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/.bun/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
+
+// processi lunghi (dev server, suite): non stanno in un timeout, vivono oltre la singola chiamata
+const jobs = new Map();
+let jobSeq = 1;
 
 const CONFIG_PATH = process.env.DEVBRIDGE_CONFIG
   || path.join(os.homedir(), '.config', 'devbridge', 'config.json');
@@ -53,9 +60,77 @@ function resolveInRoot(p) {
 // ---------- tools ----------
 
 const tools = {
+  run_background: {
+    description: 'Avvia un processo lungo in background (dev server, watch, suite di test) e torna subito con un id. '
+      + 'Usa read_output per leggerne l output e stop_background per fermarlo. Serve per tutto cio che non finisce da solo.',
+    annotations: { title: 'Avvia processo in background', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'es. "pnpm dev"' },
+        cwd: { type: 'string' },
+        name: { type: 'string', description: 'Nome breve per ritrovarlo, es. "dev-server"' },
+      },
+      required: ['command', 'cwd'],
+    },
+    handler: async ({ command, cwd, name }) => {
+      const dir = resolveInRoot(cwd);
+      const key = name || 'job' + (jobSeq++);
+      if (jobs.has(key)) throw new Error(`Esiste gia un processo "${key}". Fermalo con stop_background o usa un altro nome.`);
+      const out = path.join(os.tmpdir(), `devbridge-${key}-${Date.now()}.log`);
+      const fd = fs.openSync(out, 'w');
+      const child = spawn('/bin/bash', ['-lc', command], {
+        cwd: dir, detached: true, stdio: ['ignore', fd, fd],
+        env: { ...process.env, PATH: SAFE_PATH },
+      });
+      child.unref();
+      jobs.set(key, { pid: child.pid, log: out, command, cwd: dir, started: Date.now() });
+      await new Promise(r => setTimeout(r, 2500));
+      const first = fs.readFileSync(out, 'utf8').slice(0, 1500);
+      const alive = (() => { try { process.kill(child.pid, 0); return true; } catch { return false; } })();
+      return `avviato "${key}" pid=${child.pid} ${alive ? '(vivo)' : '(GIA USCITO)'}\n--- primi output\n${first || '(ancora niente)'}`;
+    },
+  },
+
+  read_output: {
+    description: 'Legge l output di un processo avviato con run_background.',
+    annotations: { title: 'Leggi output processo', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        lines: { type: 'integer', description: 'Ultime N righe, default 120' },
+      },
+      required: ['name'],
+    },
+    handler: async ({ name, lines = 120 }) => {
+      const j = jobs.get(name);
+      if (!j) return `Nessun processo "${name}". Attivi: ${[...jobs.keys()].join(', ') || 'nessuno'}`;
+      const alive = (() => { try { process.kill(j.pid, 0); return true; } catch { return false; } })();
+      const text = fs.existsSync(j.log) ? fs.readFileSync(j.log, 'utf8') : '';
+      const tail = text.split('\n').slice(-lines).join('\n');
+      return `"${name}" pid=${j.pid} ${alive ? 'in esecuzione' : 'TERMINATO'} da ${Math.round((Date.now() - j.started) / 1000)}s\n--- ultime ${lines} righe\n${tail.slice(-40_000)}`;
+    },
+  },
+
+  stop_background: {
+    description: 'Ferma un processo avviato con run_background. Senza nome, elenca quelli attivi.',
+    annotations: { title: 'Ferma processo', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    inputSchema: { type: 'object', properties: { name: { type: 'string' } } },
+    handler: async ({ name }) => {
+      if (!name) return [...jobs.entries()].map(([k, j]) => `${k} pid=${j.pid} ${j.command}`).join('\n') || 'nessun processo attivo';
+      const j = jobs.get(name);
+      if (!j) return `Nessun processo "${name}"`;
+      try { process.kill(-j.pid, 'SIGTERM'); } catch { try { process.kill(j.pid, 'SIGTERM'); } catch {} }
+      jobs.delete(name);
+      return `fermato "${name}" (pid ${j.pid})`;
+    },
+  },
+
   list_roots: {
     description: 'Elenca le cartelle di progetto a cui hai accesso. Chiamalo per primo se non sai dove sei.',
     inputSchema: { type: 'object', properties: {} },
+    annotations: { title: 'Elenca cartelle di progetto', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     handler: async () => roots().map(r => `${r}${fs.existsSync(r) ? '' : '  (MANCANTE)'}`).join('\n'),
   },
 
@@ -66,6 +141,7 @@ const tools = {
       properties: { path: { type: 'string', description: 'Percorso assoluto della directory' } },
       required: ['path'],
     },
+    annotations: { title: 'Elenca directory', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     handler: async ({ path: p }) => {
       const dir = resolveInRoot(p);
       const entries = await fsp.readdir(dir, { withFileTypes: true });
@@ -94,6 +170,7 @@ const tools = {
       },
       required: ['path'],
     },
+    annotations: { title: 'Leggi file', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     handler: async ({ path: p, offset = 1, limit = 800 }) => {
       const f = resolveInRoot(p);
       const st = await fsp.stat(f);
@@ -115,6 +192,7 @@ const tools = {
       properties: { path: { type: 'string' }, content: { type: 'string' } },
       required: ['path', 'content'],
     },
+    annotations: { title: 'Scrivi file', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     handler: async ({ path: p, content }) => {
       const f = resolveInRoot(p);
       await fsp.mkdir(path.dirname(f), { recursive: true });
@@ -136,6 +214,7 @@ const tools = {
       },
       required: ['path', 'old_string', 'new_string'],
     },
+    annotations: { title: 'Modifica file', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     handler: async ({ path: p, old_string, new_string, replace_all = false }) => {
       const f = resolveInRoot(p);
       const text = await fsp.readFile(f, 'utf8');
@@ -161,6 +240,7 @@ const tools = {
       },
       required: ['pattern', 'path'],
     },
+    annotations: { title: 'Cerca nel codice', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     handler: async ({ pattern, path: p, glob, max_results = 100 }) => {
       const dir = resolveInRoot(p);
       const rg = fs.existsSync('/opt/homebrew/bin/rg') ? '/opt/homebrew/bin/rg'
@@ -185,6 +265,7 @@ const tools = {
       properties: { glob: { type: 'string', description: 'es. **/*.tsx' }, path: { type: 'string' } },
       required: ['glob', 'path'],
     },
+    annotations: { title: 'Trova file', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     handler: async ({ glob, path: p }) => {
       const dir = resolveInRoot(p);
       const rg = fs.existsSync('/opt/homebrew/bin/rg') ? '/opt/homebrew/bin/rg'
@@ -209,6 +290,7 @@ const tools = {
       },
       required: ['cwd', 'args'],
     },
+    annotations: { title: 'Comando git', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     handler: async ({ cwd, args }) => {
       const dir = resolveInRoot(cwd);
       if (args.some(a => /^(push|remote)$/.test(a))) throw new Error('push/remote non consentiti da qui: lo fa l\'umano.');
@@ -231,17 +313,22 @@ const tools = {
       },
       required: ['command', 'cwd'],
     },
+    annotations: { title: 'Esegui comando', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     handler: async ({ command, cwd }) => {
       if (!CFG.allowExec) throw new Error('run_command disabilitato nella config.');
       const dir = resolveInRoot(cwd);
-      const env = { ...process.env, PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/.bun/bin:/usr/bin:/bin:/usr/sbin:/sbin` };
+      const env = { ...process.env, PATH: SAFE_PATH };
       try {
         const { stdout, stderr } = await execFileP('/bin/bash', ['-lc', command], {
-          cwd: dir, env, maxBuffer: 8e6, timeout: CFG.execTimeoutMs,
+          cwd: dir, env, maxBuffer: 8e6,
+          timeout: Math.min((timeout_sec ? timeout_sec * 1000 : CFG.execTimeoutMs), 900_000),
         });
         return `exit=0\n--- stdout\n${stdout.slice(-30_000)}\n--- stderr\n${stderr.slice(-10_000)}`;
       } catch (e) {
-        return `exit=${e.code ?? 'timeout'}\n--- stdout\n${(e.stdout || '').slice(-30_000)}\n--- stderr\n${(e.stderr || '').slice(-20_000)}`;
+        const why = e.killed || e.signal === 'SIGTERM'
+          ? `TIMEOUT dopo ${Math.min((timeout_sec ? timeout_sec : CFG.execTimeoutMs / 1000), 900)}s. Rilancia con timeout_sec piu alto, o avvia in background con run_background.`
+          : `exit=${e.code}`;
+        return `${why}\n--- stdout\n${(e.stdout || '').slice(-30_000)}\n--- stderr\n${(e.stderr || '').slice(-20_000)}`;
       }
     },
   },
@@ -254,8 +341,11 @@ const SERVER_INFO = { name: 'devbridge', version: '0.1.0' };
 function toolList() {
   return Object.entries(tools).map(([name, t]) => ({
     name,
+    title: t.annotations?.title,
     description: t.description,
     inputSchema: t.inputSchema,
+    // senza annotations il client marca ogni tool come distruttivo e chiede conferma a ogni chiamata
+    annotations: t.annotations,
   }));
 }
 
