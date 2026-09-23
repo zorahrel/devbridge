@@ -56,7 +56,7 @@ Two listeners, two regimes:
 | | address | auth | what it may do |
 |---|---|---|---|
 | **local** | `127.0.0.1:8787`, plus the tailnet via `tailscale serve --set-path /devbridge` | admin token as `Authorization: Bearer` | everything in your roots, Windows over ssh |
-| **remote** | `127.0.0.1:8788`, reached only by a named Cloudflare tunnel | OAuth 2.1 (DCR + PKCE) | read the roots, write and run only in `~/devbridge-sandbox`, kernel-enforced |
+| **remote** (off by default) | `127.0.0.1:8788`, reached only by a named Cloudflare tunnel; starts only when `issuer` is set in the config | OAuth 2.1 (DCR + PKCE) | read the roots, write and run only in `~/devbridge-sandbox`, kernel-enforced |
 
 For ChatGPT: **Settings → Apps → Create app**, URL `https://<your-host>/mcp`, auth **OAuth**. The
 consent page asks for the admin token (`~/.config/devbridge/token`), which only you can read.

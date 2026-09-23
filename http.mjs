@@ -27,9 +27,10 @@ const arg = (k, d) => (process.argv.includes(k) ? process.argv[process.argv.inde
 const PORT = Number(arg('--port', process.env.PORT || 8787));
 const REMOTE_PORT = Number(arg('--remote-port', process.env.REMOTE_PORT || 8788));
 // The issuer is the public https origin of the tunnel: OAuth ties every token to it, so
-// there is no sensible default. run.sh reads it from config.json (`issuer`).
+// there is no default. Without one the remote regime simply does not exist: only the
+// local listener starts. That is the default since 23/09 (Attilio: local only).
 const ISSUER = arg('--issuer', process.env.DEVBRIDGE_ISSUER || '');
-if (!ISSUER) { console.error('manca --issuer https://<host pubblico del tunnel> (o DEVBRIDGE_ISSUER)'); process.exit(2); }
+const REMOTE_ON = !!ISSUER;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN_PATH = path.join(os.homedir(), '.config', 'devbridge', 'token');
 
@@ -85,7 +86,7 @@ function makeChild(mode) {
   return { call, nextId: () => nextId++ };
 }
 
-const oauth = createOAuth({ issuer: ISSUER, adminToken: TOKEN });
+const oauth = REMOTE_ON ? createOAuth({ issuer: ISSUER, adminToken: TOKEN }) : null;
 
 function handler({ child, remote }) {
   return async (req, res) => {
@@ -147,9 +148,12 @@ function safeEqual(a, b) {
 
 http.createServer(handler({ child: makeChild('local'), remote: false })).listen(PORT, '127.0.0.1', () => {
   console.error(`devbridge LOCAL  http://127.0.0.1:${PORT}/mcp  (Bearer admin token, poteri pieni)`);
-});
-http.createServer(handler({ child: makeChild('remote'), remote: true })).listen(REMOTE_PORT, '127.0.0.1', () => {
-  console.error(`devbridge REMOTE http://127.0.0.1:${REMOTE_PORT}/mcp  (OAuth, sandbox) issuer ${ISSUER}`);
   // Il token non si stampa: un log e' la copia che sopravvive alla rotazione.
   console.error(`token admin in ${TOKEN_PATH} (${TOKEN.length} caratteri)`);
+  if (!REMOTE_ON) console.error('regime remoto SPENTO (nessun --issuer): niente OAuth, niente sandbox esposta');
 });
+if (REMOTE_ON) {
+  http.createServer(handler({ child: makeChild('remote'), remote: true })).listen(REMOTE_PORT, '127.0.0.1', () => {
+    console.error(`devbridge REMOTE http://127.0.0.1:${REMOTE_PORT}/mcp  (OAuth, sandbox) issuer ${ISSUER}`);
+  });
+}

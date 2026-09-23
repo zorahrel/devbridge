@@ -15,7 +15,7 @@ CF=/opt/homebrew/bin/cloudflared
 LOG="$DIR/logs"; mkdir -p "$LOG"
 CONFIG="$HOME/.config/devbridge/config.json"
 ISSUER="${DEVBRIDGE_ISSUER:-$("$NODE" -e 'try{process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).issuer||"")}catch{}' "$CONFIG")}"
-[ -z "$ISSUER" ] && { echo "$(date '+%F %T') manca \"issuer\" in $CONFIG (https://<host pubblico del tunnel>)" >&2; exit 1; }
+# No issuer = local only (the default): no remote listener, no tunnel, nothing public.
 
 # a leftover on either port makes http.mjs die with EADDRINUSE and launchd loop
 for port in 8787 8788; do
@@ -24,6 +24,17 @@ done
 pkill -f "mcp-devbridge/http.mjs" 2>/dev/null
 pkill -f "cloudflared tunnel" 2>/dev/null
 sleep 2
+
+if [ -z "$ISSUER" ]; then
+  "$NODE" "$DIR/http.mjs" --port 8787 > "$LOG/http.log" 2>&1 &
+  HTTP_PID=$!
+  trap 'kill "$HTTP_PID" 2>/dev/null; exit 0' TERM INT
+  rm -f "$LOG/current-url.txt"
+  echo "$(date '+%F %T') UP solo locale 127.0.0.1:8787 (regime web spento)"
+  wait "$HTTP_PID"
+  echo "$(date '+%F %T') DOWN, riavvio via launchd"
+  exit 0
+fi
 
 TUNNEL_TOKEN=$(security find-generic-password -s devbridge -a cloudflared-tunnel-token -w 2>/dev/null)
 [ -z "$TUNNEL_TOKEN" ] && { echo "$(date '+%F %T') token del tunnel assente nel Keychain (devbridge/cloudflared-tunnel-token)" >&2; exit 1; }
