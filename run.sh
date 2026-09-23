@@ -34,7 +34,11 @@ done
 TOK=$(cat "$HOME/.config/devbridge/token")
 FULL="$URL/mcp/$TOK"
 echo "$FULL" > "$LOG/current-url.txt"
-echo "$(date '+%F %T') UP $FULL"
+# Su stdout va l'URL SENZA token: stdout finisce in agent.log, che resta per sempre,
+# mentre current-url.txt viene riscritto a ogni avvio ed e' l'unica copia che serve.
+# Il token sta nel path perche' il connettore ChatGPT non manda header: finche' e' li',
+# chiunque logghi un URL logga un segreto — cloudflared lo fa a ogni richiesta.
+echo "$(date '+%F %T') UP $URL/mcp/<token in ~/.config/devbridge/token>"
 
 # cloudflared stampa l'URL prima che il bordo Cloudflare lo serva davvero: senza questa
 # attesa il sync riceve 424 "Connection failed" e l'app resta puntata al vecchio tunnel

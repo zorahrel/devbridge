@@ -104,5 +104,8 @@ const srv = http.createServer(async (req, res) => {
 
 srv.listen(PORT, '127.0.0.1', () => {
   console.error(`devbridge http su http://127.0.0.1:${PORT}/mcp`);
-  console.error(`token: ${TOKEN}`);
+  // Il token NON si stampa: stdout/stderr finiscono in un file di log, e un log
+  // e' la copia che sopravvive alla rotazione della chiave. Sta gia' su disco a
+  // 0600, quindi stamparlo non aggiungeva niente se non una seconda copia.
+  console.error(`token in ${TOKEN_PATH} (${TOKEN.length} caratteri)`);
 });
