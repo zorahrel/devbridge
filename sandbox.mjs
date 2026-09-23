@@ -41,7 +41,7 @@ const TOOLCHAINS = ['.bun', '.nvm', '.cargo', '.rustup', '.deno', 'Library/pnpm'
   .map((p) => path.join(HOME, p));
 
 /** Never readable, even inside a project root (same list the file tools refuse). */
-const SECRET_NAMES = String.raw`/(\.env(\.[^/]*)?|\.npmrc|\.git-credentials|credentials(\.toml)?|auth\.json|id_[a-z0-9]+|[^/]*\.pem|[^/]*\.p12|[^/]*\.key)$`;
+const SECRET_NAMES = String.raw`/(\.env(\.[^/]*)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials|credentials(\.toml|\.json)?|auth\.json|secrets?(\.[a-z]+)?|service-?account[^/]*\.json|[^/]*-key\.json|id_[a-z0-9]+|[^/]*\.pem|[^/]*\.p12|[^/]*\.pfx|[^/]*\.key|[^/]*\.keystore)$`;
 
 /** Programs that carry the owner's identity off the machine. Belt and braces: the mach
  *  and socket rules already cut them off, and a renamed copy would dodge a path rule. */
@@ -67,7 +67,24 @@ const MACH_ALLOW = [
 const q = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-/** The per-user temp dir: /usr/bin/git is an xcrun shim that caches its lookup there. */
+/**
+ * Where the real developer tools live. /usr/bin/git, python3, clang... are xcrun shims:
+ * they cache their lookup in DARWIN_USER_TEMP_DIR/xcrun_db, a plain key->path file every
+ * unsandboxed git of the owner reads back. Letting the sandbox write it (so the shim
+ * works) was a code-execution hole: rewrite the `git` entry, and the owner's next git
+ * runs your binary. Found by the second adversarial check of 23/09. So remote commands
+ * get the real bin dir first in PATH and never touch the shim or its cache.
+ */
+export function developerBin() {
+  try {
+    const dir = execFileSync('/usr/bin/xcode-select', ['-p'], { encoding: 'utf8' }).trim();
+    const bin = path.join(dir, 'usr', 'bin');
+    if (fs.existsSync(path.join(bin, 'git'))) return bin;
+  } catch { /* no developer tools: git simply is not available remotely */ }
+  return null;
+}
+
+/** The per-user temp dir: other apps' sockets and caches, never readable remotely. */
 function userTempDir() {
   try {
     return fs.realpathSync(execFileSync('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'], { encoding: 'utf8' }).trim());
@@ -89,12 +106,8 @@ export function profile(readRoots = []) {
     `(allow file-read-data (literal ${q(HOME)}) ${readable.map((p) => `(subpath ${q(p)})`).join(' ')})`,
     // anchored to $HOME: a bare *.pem rule also hid /etc/ssl/cert.pem and broke TLS
     `(deny file-read-data (regex #"^${escRe(HOME)}/.*${SECRET_NAMES}"))`,
-    // the user temp dir holds other apps' sockets and scratch: closed, except the
-    // xcrun cache /usr/bin/git needs (later rules win in SBPL)
-    ...(utmp ? [
-      `(deny file-read-data (subpath ${q(utmp)}))`,
-      `(allow file-write* file-read-data (regex #"^${escRe(utmp)}/xcrun_db"))`,
-    ] : []),
+    // the user temp dir holds other apps' sockets and the xcrun cache: closed both ways
+    ...(utmp ? [`(deny file-read-data (subpath ${q(utmp)}))`] : []),
     // network: https/http and DNS out, never loopback, never local sockets
     '(deny network-outbound)',
     '(allow network-outbound (remote tcp "*:443") (remote tcp "*:80") (remote udp "*:53") (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))',
@@ -132,8 +145,10 @@ export function sandboxed(file, args, readRoots = []) {
 
 /** Environment of a remote command: nothing inherited (no SSH_AUTH_SOCK, no tokens). */
 export function sandboxEnv(pathValue) {
+  const dev = developerBin();
   return {
-    PATH: pathValue, HOME: SANDBOX_HOME, TMPDIR: SANDBOX_TMP + path.sep,
+    PATH: dev ? `${dev}:${pathValue}` : pathValue,
+    HOME: SANDBOX_HOME, TMPDIR: SANDBOX_TMP + path.sep,
     LANG: process.env.LANG || 'en_US.UTF-8', TERM: 'dumb',
     GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1',
   };

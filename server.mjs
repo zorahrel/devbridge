@@ -10,7 +10,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { taskTools, load as loadTask } from './tools-task.mjs';
-import { sandboxed, sandboxEnv, remoteMayWrite, SANDBOX_ROOT } from './sandbox.mjs';
+import { sandboxed, sandboxEnv, developerBin, remoteMayWrite, SANDBOX_ROOT } from './sandbox.mjs';
 
 // Set by http.mjs on the child that serves the public tunnel. In remote mode every
 // command runs inside the kernel sandbox and file writes are allowed only under
@@ -33,6 +33,12 @@ const SAFE_PATH = IS_WINDOWS
     ].filter(Boolean).join(path.delimiter)
   : `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME || os.homedir()}/.bun/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
 
+// Remote: the real developer tools come before /usr/bin, whose git/python3 are xcrun shims
+// that would need the owner's shared xcrun cache (see developerBin in sandbox.mjs).
+const DEV_BIN = REMOTE && !IS_WINDOWS ? developerBin() : null;
+const RUN_PATH = DEV_BIN ? `${DEV_BIN}:${SAFE_PATH}` : SAFE_PATH;
+const GIT = DEV_BIN ? path.join(DEV_BIN, 'git') : '/usr/bin/git';
+
 function commandEnv() {
   // Remote: nothing inherited. The parent env carries SSH_AUTH_SOCK and whatever launchd
   // gave the bridge; a sandboxed command has no business seeing either.
@@ -50,7 +56,7 @@ function shellInvocation(command) {
       : 'powershell.exe';
     return { file: powershell, args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command] };
   }
-  const bash = { file: '/bin/bash', args: ['-lc', `export PATH="${SAFE_PATH}"; ${command}`] };
+  const bash = { file: '/bin/bash', args: ['-lc', `export PATH="${RUN_PATH}"; ${command}`] };
   return REMOTE ? sandboxed(bash.file, bash.args, configRoots()) : bash;
 }
 
@@ -413,7 +419,7 @@ const tools = {
       const dir = resolveInRoot(cwd);
       if (args.some(a => /^(push|remote)$/.test(a))) throw new Error('push/remote non consentiti da qui: lo fa l\'umano.');
       try {
-        const g = REMOTE ? sandboxed('/usr/bin/git', args, configRoots()) : { file: '/usr/bin/git', args };
+        const g = REMOTE ? sandboxed(GIT, args, configRoots()) : { file: '/usr/bin/git', args };
         const opts = { cwd: dir, maxBuffer: 8e6, timeout: 120_000, ...(REMOTE ? { env: commandEnv() } : {}) };
         const { stdout, stderr } = await execFileP(g.file, g.args, opts);
         return (stdout + stderr).slice(0, 60_000) || '(nessun output)';

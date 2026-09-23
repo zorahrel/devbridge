@@ -153,6 +153,19 @@ try {
   const net = await sh('curl -s -m10 -o /dev/null -w "%{http_code}" https://registry.npmjs.org/left-pad');
   check('remote: https verso internet funziona', /200/.test(out(net)), net.slice(0, 200));
 
+  // Second check of 23/09: the xcrun cache is shared with every unsandboxed git of the
+  // owner; writing it meant choosing which binary their next `git` runs.
+  const utmp = fs.realpathSync(execFileSync('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'], { encoding: 'utf8' }).trim());
+  const xc = await sh(`echo x >> ${utmp}/xcrun_db && echo XCRUN_WRITTEN; echo x > ${utmp}/xcrun_db_e2e && echo XCRUN_NEW; git --version`);
+  check('remote: cache xcrun condivisa non scrivibile', !/XCRUN_/.test(out(xc)) && !fs.existsSync(path.join(utmp, 'xcrun_db_e2e')), out(xc).slice(0, 200));
+  check('remote: git funziona senza la cache xcrun', /git version/.test(out(xc)), xc.slice(0, 200));
+  const secretDir = fs.mkdtempSync(path.join(HOME, 'Projects', '.devbridge-e2e-'));
+  fs.writeFileSync(path.join(secretDir, 'secrets.json'), '{"k":"SECRET_E2E"}');
+  fs.writeFileSync(path.join(secretDir, 'service-account.json'), '{"k":"SECRET_E2E"}');
+  const sec = await sh(`cat ${secretDir}/secrets.json ${secretDir}/service-account.json 2>/dev/null; true`);
+  fs.rmSync(secretDir, { recursive: true, force: true });
+  check('remote: secrets.json e service account illeggibili nei root', !/SECRET_E2E/.test(out(sec)));
+
   // ---- local keeps full powers
   const lw = await call(L, `Bearer ${TOKEN}`, 'run_command', { command: 'echo local-ok', cwd: path.join(HOME, 'Projects') });
   check('local: run_command normale', /local-ok/.test(lw));
