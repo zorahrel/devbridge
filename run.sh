@@ -1,59 +1,48 @@
 #!/bin/bash
-# Foreground: launchd deve poter supervisionare il processo. Avvia http.mjs e il tunnel,
-# scrive l'URL corrente in logs/current-url.txt e resta vivo finche' uno dei due muore.
+# Foreground: launchd supervises this process. Starts http.mjs (two listeners) and the
+# NAMED Cloudflare tunnel, and stays alive until one of them dies.
+#
+#   local  127.0.0.1:8787  this Mac + tailnet (`tailscale serve --set-path /devbridge`)
+#   remote 127.0.0.1:8788  only the tunnel devbridge.armonia.io -> OAuth + sandbox
+#
+# Since 23/09 there is no quick tunnel and no token in any URL: the public address is
+# fixed (https://devbridge.armonia.io/mcp), so ChatGPT's connector never has to be
+# re-pointed, and the tunnel credential lives in the Keychain (devbridge /
+# cloudflared-tunnel-token), not on disk.
 DIR="$HOME/jarvis/mcp-devbridge"
 NODE=/opt/homebrew/bin/node
 CF=/opt/homebrew/bin/cloudflared
 LOG="$DIR/logs"; mkdir -p "$LOG"
-: > "$LOG/tunnel.log"
+ISSUER="${DEVBRIDGE_ISSUER:-https://devbridge.armonia.io}"
 
-# un residuo sulla 8787 fa morire http.mjs con EADDRINUSE e manda launchd in restart loop
-# libera la porta per PID: pkill -f non prende i processi lanciati con path relativo
-for pid in $(lsof -nP -iTCP:8787 -sTCP:LISTEN -t 2>/dev/null); do kill -9 "$pid" 2>/dev/null; done
+# a leftover on either port makes http.mjs die with EADDRINUSE and launchd loop
+for port in 8787 8788; do
+  for pid in $(lsof -nP -iTCP:$port -sTCP:LISTEN -t 2>/dev/null); do kill -9 "$pid" 2>/dev/null; done
+done
 pkill -f "mcp-devbridge/http.mjs" 2>/dev/null
-pkill -f "cloudflared tunnel --url http://127.0.0.1:8787" 2>/dev/null
+pkill -f "cloudflared tunnel" 2>/dev/null
 sleep 2
 
-"$NODE" "$DIR/http.mjs" --port 8787 > "$LOG/http.log" 2>&1 &
+TUNNEL_TOKEN=$(security find-generic-password -s devbridge -a cloudflared-tunnel-token -w 2>/dev/null)
+[ -z "$TUNNEL_TOKEN" ] && { echo "$(date '+%F %T') token del tunnel assente nel Keychain (devbridge/cloudflared-tunnel-token)" >&2; exit 1; }
+
+"$NODE" "$DIR/http.mjs" --port 8787 --remote-port 8788 --issuer "$ISSUER" > "$LOG/http.log" 2>&1 &
 HTTP_PID=$!
 sleep 2
-"$CF" tunnel --url http://127.0.0.1:8787 > "$LOG/tunnel.log" 2>&1 &
+# --no-autoupdate: launchd owns the lifecycle. The token goes through the environment,
+# not argv, so `ps` does not show it. --loglevel warn: cloudflared at info logs the
+# path of every request, which is how the old token ended up 34 times in tunnel.log.
+TUNNEL_TOKEN="$TUNNEL_TOKEN" "$CF" tunnel --no-autoupdate --loglevel warn run > "$LOG/tunnel.log" 2>&1 &
 CF_PID=$!
+unset TUNNEL_TOKEN
 
 cleanup() { kill "$HTTP_PID" "$CF_PID" 2>/dev/null; exit 0; }
 trap cleanup TERM INT
 
-URL=""
-for i in $(seq 1 40); do
-  URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "$LOG/tunnel.log" | head -1)
-  [ -n "$URL" ] && break
-  sleep 1
-done
-[ -z "$URL" ] && { echo "tunnel non avviato" >&2; cleanup; }
+echo "$ISSUER/mcp" > "$LOG/current-url.txt"
+echo "$(date '+%F %T') UP local 127.0.0.1:8787, remote $ISSUER/mcp (OAuth)"
 
-TOK=$(cat "$HOME/.config/devbridge/token")
-FULL="$URL/mcp/$TOK"
-echo "$FULL" > "$LOG/current-url.txt"
-# Su stdout va l'URL SENZA token: stdout finisce in agent.log, che resta per sempre,
-# mentre current-url.txt viene riscritto a ogni avvio ed e' l'unica copia che serve.
-# Il token sta nel path perche' il connettore ChatGPT non manda header: finche' e' li',
-# chiunque logghi un URL logga un segreto — cloudflared lo fa a ogni richiesta.
-echo "$(date '+%F %T') UP $URL/mcp/<token in ~/.config/devbridge/token>"
-
-# cloudflared stampa l'URL prima che il bordo Cloudflare lo serva davvero: senza questa
-# attesa il sync riceve 424 "Connection failed" e l'app resta puntata al vecchio tunnel
-for i in $(seq 1 30); do
-  code=$(curl -s -o /dev/null -w '%{http_code}' -m 8 -X POST "$FULL" \
-    -H 'content-type: application/json' \
-    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' 2>/dev/null)
-  [ "$code" = "200" ] && { echo "  tunnel raggiungibile dopo ${i}s"; break; }
-  sleep 1
-done
-
-# l'URL trycloudflare cambia a ogni avvio: riallinea l'app in ChatGPT
-"$NODE" "$DIR/sync-connector.mjs" "$FULL" 2>&1 | sed 's/^/  sync: /' || echo "  sync fallito (Chrome CDP spento?)"
-
-# bash 3.2 (macOS) non ha `wait -n`: polling dei due figli
+# bash 3.2 (macOS) has no `wait -n`: poll both children
 while kill -0 "$HTTP_PID" 2>/dev/null && kill -0 "$CF_PID" 2>/dev/null; do sleep 10; done
 echo "$(date '+%F %T') DOWN (un processo e' uscito), riavvio via launchd"
 cleanup

@@ -48,13 +48,20 @@ Requires Node 20+ and a ChatGPT account with developer mode enabled.
 git clone https://github.com/zorahrel/devbridge.git ~/devbridge
 cd ~/devbridge
 cp config.example.json ~/.config/devbridge/config.json   # list your project folders here
-./run.sh                                                  # prints the URL to paste into ChatGPT
+./run.sh
 ```
 
-Paste that URL into **ChatGPT → Settings → Apps → Create app**, auth *None*. Done.
+Two listeners, two regimes:
 
-For unattended use, `install-agent.sh` sets up a launchd agent that starts everything at login and
-keeps the ChatGPT app pointed at the current tunnel by itself.
+| | address | auth | what it may do |
+|---|---|---|---|
+| **local** | `127.0.0.1:8787`, plus the tailnet via `tailscale serve --set-path /devbridge` | admin token as `Authorization: Bearer` | everything in your roots, Windows over ssh |
+| **remote** | `127.0.0.1:8788`, reached only by a named Cloudflare tunnel | OAuth 2.1 (DCR + PKCE) | read the roots, write and run only in `~/devbridge-sandbox`, kernel-enforced |
+
+For ChatGPT: **Settings → Apps → Create app**, URL `https://<your-host>/mcp`, auth **OAuth**. The
+consent page asks for the admin token (`~/.config/devbridge/token`), which only you can read.
+
+`install-agent.sh` sets up a launchd agent that starts both listeners and the tunnel at login.
 
 ## The tools
 
@@ -74,8 +81,15 @@ The model is a guest on your machine, not the owner.
   resolved before the check.
 - **Secrets are never readable**, not even inside an allowed root: `.env*`, `*.pem`, `id_rsa*`,
   `auth.json`, anything under `.ssh/`.
-- **No `git push`, no `git remote`.** Publishing stays a human decision.
-- **Bearer token**, 0600 on disk. No token, no answer.
+- **Remote calls run in a kernel sandbox** (`sandbox.mjs`, macOS `sandbox-exec`): writes only
+  under `~/devbridge-sandbox`, no `ssh`, `gh`, `security` or git remote helpers, no reading
+  `~/.ssh`, the Keychain or the bridge's own secrets. A rule inside the git tool used to forbid
+  push; `run_command` is bash, and `git -c alias.p=push p` walked straight past it. The kernel
+  does not care how the command is spelled.
+- **No secret in any URL.** The token used to travel in the path because the connector form had
+  no header field: every proxy log kept a copy. Local takes a header, remote takes OAuth.
+- **Admin token**, 0600 on disk, never printed. OAuth tokens are stored hashed, expire in an hour,
+  refresh tokens rotate on use.
 - Only `run_command` is marked destructive, so that is the only prompt you see. A confirmation
   dialog you dismiss on every single call is not a safety feature, it is furniture.
 
@@ -119,12 +133,12 @@ response, and a file truncated halfway costs more than two extra calls.
 
 ## Limits, honestly
 
-- **Free tunnels rotate.** `trycloudflare` hands out a new hostname each boot and the connector
-  API has no PATCH, so the app is deleted and recreated on every start. Automatic, but it needs a
-  logged-in browser session. A custom domain removes this entirely.
+- **The remote regime needs a named tunnel and a domain.** A `trycloudflare` quick tunnel rotates
+  its hostname on every boot, and OAuth ties the tokens to the address.
 - **A turn is slow.** Two to five minutes of real work each. The loop is autonomous, not fast.
-- **No sandbox beyond the roots.** `run_command` runs what it is told inside them. The fence is
-  the filesystem, not a VM.
+- **The sandbox is macOS-only** (`sandbox-exec`) and is not a VM: outbound network stays open so
+  installs work, but without your credentials it reaches only what the public internet does.
+  Locally there is no sandbox at all: the local regime is you.
 
 ## How it works
 

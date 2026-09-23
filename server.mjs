@@ -10,6 +10,12 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { taskTools, load as loadTask } from './tools-task.mjs';
+import { sandboxed, remoteMayWrite, SANDBOX_ROOT } from './sandbox.mjs';
+
+// Set by http.mjs on the child that serves the public tunnel. In remote mode every
+// command runs inside the kernel sandbox and file writes are allowed only under
+// SANDBOX_ROOT; see sandbox.mjs for why a rule inside a tool is not enough.
+const REMOTE = process.env.DEVBRIDGE_MODE === 'remote';
 
 const execFileP = promisify(execFile);
 
@@ -41,7 +47,17 @@ function shellInvocation(command) {
       : 'powershell.exe';
     return { file: powershell, args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command] };
   }
-  return { file: '/bin/bash', args: ['-lc', `export PATH="${SAFE_PATH}"; ${command}`] };
+  const bash = { file: '/bin/bash', args: ['-lc', `export PATH="${SAFE_PATH}"; ${command}`] };
+  return REMOTE ? sandboxed(bash.file, bash.args) : bash;
+}
+
+/** Resolve a path the caller wants to WRITE: in remote mode only inside the sandbox. */
+function resolveWritable(p) {
+  const real = resolveInRoot(p);
+  if (REMOTE && !remoteMayWrite(real)) {
+    throw new Error(`Da remoto si scrive solo in ${SANDBOX_ROOT}. Clona o crea un worktree li' (git clone file://<progetto> ${SANDBOX_ROOT}/<nome>) e lavora sulla copia.`);
+  }
+  return real;
 }
 
 // processi lunghi (dev server, suite): non stanno in un timeout, vivono oltre la singola chiamata
@@ -71,7 +87,10 @@ function loadConfig() {
 }
 
 let CFG = loadConfig();
-const roots = () => CFG.roots.map(r => path.resolve(r.replace(/^~/, os.homedir())));
+const roots = () => {
+  const r = CFG.roots.map(x => path.resolve(x.replace(/^~/, os.homedir())));
+  return REMOTE ? [...r, SANDBOX_ROOT] : r;
+};
 
 function resolveInRoot(p) {
   const abs = path.resolve(p.replace(/^~/, os.homedir()));
@@ -241,7 +260,7 @@ const tools = {
     },
     annotations: { title: 'Scrivi file', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     handler: async ({ path: p, content }) => {
-      const f = resolveInRoot(p);
+      const f = resolveWritable(p);
       await fsp.mkdir(path.dirname(f), { recursive: true });
       const existed = fs.existsSync(f);
       await fsp.writeFile(f, content, 'utf8');
@@ -263,7 +282,7 @@ const tools = {
     },
     annotations: { title: 'Modifica file', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     handler: async ({ path: p, old_string, new_string, replace_all = false }) => {
-      const f = resolveInRoot(p);
+      const f = resolveWritable(p);
       const text = await fsp.readFile(f, 'utf8');
       const parts = text.split(old_string);
       const n = parts.length - 1;
@@ -289,7 +308,7 @@ const tools = {
       required: ['path', 'content'],
     },
     handler: async ({ path: p, content }) => {
-      const f = resolveInRoot(p);
+      const f = resolveWritable(p);
       await fsp.mkdir(path.dirname(f), { recursive: true });
       await fsp.appendFile(f, content, 'utf8');
       const st = await fsp.stat(f);
@@ -365,7 +384,8 @@ const tools = {
       const dir = resolveInRoot(cwd);
       if (args.some(a => /^(push|remote)$/.test(a))) throw new Error('push/remote non consentiti da qui: lo fa l\'umano.');
       try {
-        const { stdout, stderr } = await execFileP('/usr/bin/git', args, { cwd: dir, maxBuffer: 8e6, timeout: 120_000 });
+        const g = REMOTE ? sandboxed('/usr/bin/git', args) : { file: '/usr/bin/git', args };
+        const { stdout, stderr } = await execFileP(g.file, g.args, { cwd: dir, maxBuffer: 8e6, timeout: 120_000 });
         return (stdout + stderr).slice(0, 60_000) || '(nessun output)';
       } catch (e) {
         return `exit=${e.code}\n${(e.stdout || '') + (e.stderr || '')}`.slice(0, 60_000);
@@ -458,8 +478,12 @@ const tools = {
 
 const SERVER_INFO = { name: 'devbridge', version: '0.1.0' };
 
+/** Tools that must not exist for a remote caller: they act outside the sandbox. */
+const LOCAL_ONLY = new Set(['windows_run_command']);
+const visibleTools = () => Object.entries(tools).filter(([name]) => !(REMOTE && LOCAL_ONLY.has(name)));
+
 function toolList() {
-  return Object.entries(tools).map(([name, t]) => ({
+  return visibleTools().map(([name, t]) => ({
     name,
     title: t.annotations?.title,
     description: t.description,
@@ -487,7 +511,13 @@ async function handle(msg) {
         capabilities: { tools: { listChanged: false } },
         serverInfo: SERVER_INFO,
         instructions:
-          'devbridge da accesso ai file locali dei progetti. list_roots per vedere le cartelle, '
+          (REMOTE
+            ? 'SEI COLLEGATO DA REMOTO, IN SANDBOX. Puoi LEGGERE i progetti, ma scrivere, committare ed eseguire '
+              + `solo dentro ${SANDBOX_ROOT}. Per lavorare su un progetto: git clone file://<percorso-progetto> `
+              + `${SANDBOX_ROOT}/<nome>, poi modifica e testa li'. Push, ssh e Windows non sono disponibili: `
+              + 'consegna il lavoro come commit nella copia in sandbox e scrivi il percorso, lo porta dentro l umano.\n\n'
+            : '')
+          + 'devbridge da accesso ai file locali dei progetti. list_roots per vedere le cartelle, '
           + 'list_dir/read_file/search per orientarti, edit_file/write_file per modificare, '
           + 'run_command per test e build, run_background per cio che non finisce da solo. '
           + 'Per il PC Windows e la RTX 3090 usa windows_run_command: esegue PowerShell sul Windows via SSH dal Mac. '
@@ -521,7 +551,7 @@ async function handle(msg) {
       const name = typeof requestedName === 'string' && requestedName.startsWith('dev_bridge.')
         ? requestedName.slice('dev_bridge.'.length)
         : requestedName;
-      const t = tools[name];
+      const t = REMOTE && LOCAL_ONLY.has(name) ? undefined : tools[name];
       if (!t) return fail(`Tool sconosciuto: ${requestedName}`);
       try {
         const text = await t.handler(params.arguments || {});
