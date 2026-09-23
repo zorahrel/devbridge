@@ -5,14 +5,14 @@
 //                          tailnet. Bearer admin token in the header (never in the URL).
 //                          Full powers: every root writable, Windows over ssh.
 //   REMOTE 127.0.0.1:8788  reached ONLY by the named Cloudflare tunnel
-//                          (devbridge.armonia.io). OAuth 2.1 (oauth.mjs), and every call
+//                          (your public hostname). OAuth 2.1 (oauth.mjs), and every call
 //                          runs in the kernel sandbox (sandbox.mjs): read the projects,
 //                          write only ~/devbridge-sandbox, no push, no Windows.
 //
 // Two ports rather than one port plus a header check: the tunnel's ingress points at
 // 8788 and nothing else, so a remote request cannot claim to be local.
 //
-// Uso: node http.mjs [--port 8787] [--remote-port 8788] [--issuer https://devbridge.armonia.io]
+// Uso: node http.mjs [--port 8787] [--remote-port 8788] [--issuer https://<public-host>]
 
 import http from 'node:http';
 import fs from 'node:fs';
@@ -26,7 +26,10 @@ import { createOAuth } from './oauth.mjs';
 const arg = (k, d) => (process.argv.includes(k) ? process.argv[process.argv.indexOf(k) + 1] : d);
 const PORT = Number(arg('--port', process.env.PORT || 8787));
 const REMOTE_PORT = Number(arg('--remote-port', process.env.REMOTE_PORT || 8788));
-const ISSUER = arg('--issuer', process.env.DEVBRIDGE_ISSUER || 'https://devbridge.armonia.io');
+// The issuer is the public https origin of the tunnel: OAuth ties every token to it, so
+// there is no sensible default. run.sh reads it from config.json (`issuer`).
+const ISSUER = arg('--issuer', process.env.DEVBRIDGE_ISSUER || '');
+if (!ISSUER) { console.error('manca --issuer https://<host pubblico del tunnel> (o DEVBRIDGE_ISSUER)'); process.exit(2); }
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN_PATH = path.join(os.homedir(), '.config', 'devbridge', 'token');
 

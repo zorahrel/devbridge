@@ -2,5 +2,7 @@
   "roots": ["~/Projects", "~/Sites"],
   "maxReadBytes": 400000,
   "execTimeoutMs": 180000,
-  "allowExec": true
+  "allowExec": true,
+  "issuer": "https://devbridge.example.com",
+  "windowsSsh": { "host": "100.x.y.z", "user": "you", "connectTimeoutSec": 10 }
 }

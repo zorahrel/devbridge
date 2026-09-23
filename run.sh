@@ -3,17 +3,19 @@
 # NAMED Cloudflare tunnel, and stays alive until one of them dies.
 #
 #   local  127.0.0.1:8787  this Mac + tailnet (`tailscale serve --set-path /devbridge`)
-#   remote 127.0.0.1:8788  only the tunnel devbridge.armonia.io -> OAuth + sandbox
+#   remote 127.0.0.1:8788  only the named tunnel (config `issuer`) -> OAuth + sandbox
 #
 # Since 23/09 there is no quick tunnel and no token in any URL: the public address is
-# fixed (https://devbridge.armonia.io/mcp), so ChatGPT's connector never has to be
+# fixed (<issuer>/mcp), so ChatGPT's connector never has to be
 # re-pointed, and the tunnel credential lives in the Keychain (devbridge /
 # cloudflared-tunnel-token), not on disk.
 DIR="$HOME/jarvis/mcp-devbridge"
 NODE=/opt/homebrew/bin/node
 CF=/opt/homebrew/bin/cloudflared
 LOG="$DIR/logs"; mkdir -p "$LOG"
-ISSUER="${DEVBRIDGE_ISSUER:-https://devbridge.armonia.io}"
+CONFIG="$HOME/.config/devbridge/config.json"
+ISSUER="${DEVBRIDGE_ISSUER:-$("$NODE" -e 'try{process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).issuer||"")}catch{}' "$CONFIG")}"
+[ -z "$ISSUER" ] && { echo "$(date '+%F %T') manca \"issuer\" in $CONFIG (https://<host pubblico del tunnel>)" >&2; exit 1; }
 
 # a leftover on either port makes http.mjs die with EADDRINUSE and launchd loop
 for port in 8787 8788; do

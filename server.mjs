@@ -89,8 +89,8 @@ const DEFAULT_CONFIG = {
   maxReadBytes: 400_000,
   execTimeoutMs: 180_000,
   allowExec: true,
-  // Il bridge resta sul Mac: questo target viene raggiunto tramite SSH e PowerShell.
-  windowsSsh: { host: '100.92.197.74', user: 'zorah', connectTimeoutSec: 10 },
+  // windowsSsh: { host, user, connectTimeoutSec } nel config.json. Il bridge resta sul Mac
+  // e raggiunge il PC via SSH + PowerShell; senza config il tool lo dice e si ferma.
   denyGlobs: ['**/.env', '**/.env.*', '**/id_rsa*', '**/*.pem', '**/auth.json', '**/.ssh/**'],
 };
 

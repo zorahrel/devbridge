@@ -3,7 +3,7 @@
 # Prerequisito del regime remoto: un tunnel Cloudflare nominato con ingress su
 # http://127.0.0.1:8788 e il suo token nel Keychain:
 #   security add-generic-password -s devbridge -a cloudflared-tunnel-token -w '<token>' -U
-# e DEVBRIDGE_ISSUER=https://<host> (default https://devbridge.armonia.io).
+# e "issuer": "https://<host pubblico del tunnel>" in ~/.config/devbridge/config.json.
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 UID_N=$(id -u)
