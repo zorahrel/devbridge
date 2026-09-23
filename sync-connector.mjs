@@ -9,8 +9,8 @@ import path from 'node:path';
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const url = process.argv[2] || fs.readFileSync(path.join(HERE, 'logs/current-url.txt'), 'utf8').trim();
 const PORT = process.env.CDP_PORT || 19223;
-const NAME = 'Dev Bridge';
-const DESC = 'Legge e modifica i file dei progetti locali sul Mac';
+const NAME = process.env.DEVBRIDGE_CONNECTOR_NAME || 'Dev Bridge';
+const DESC = process.env.DEVBRIDGE_CONNECTOR_DESC || 'Legge e modifica i file dei progetti locali sul Mac';
 
 const tabs = await (await fetch(`http://127.0.0.1:${PORT}/json`).catch(() => null))?.json?.() ?? [];
 const tab = tabs.find?.(t => (t.url || '').startsWith('https://chatgpt.com'));

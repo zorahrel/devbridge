@@ -13,8 +13,36 @@ import { taskTools, load as loadTask } from './tools-task.mjs';
 
 const execFileP = promisify(execFile);
 
-// PATH esplicito: il client passa un ambiente minimale e pnpm/npx non troverebbero node
-const SAFE_PATH = `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/.bun/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
+const IS_WINDOWS = process.platform === 'win32';
+
+// PATH esplicito: il client passa un ambiente minimale e pnpm/npx non troverebbero node.
+// Su Windows conserviamo il PATH ereditato e aggiungiamo le directory di sistema.
+const SAFE_PATH = IS_WINDOWS
+  ? [
+      process.env.Path || process.env.PATH,
+      process.env.SystemRoot && path.join(process.env.SystemRoot, 'System32'),
+      process.env.SystemRoot,
+      process.env.ProgramFiles && path.join(process.env.ProgramFiles, 'nodejs'),
+      process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs', 'Ollama'),
+    ].filter(Boolean).join(path.delimiter)
+  : `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME || os.homedir()}/.bun/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
+
+function commandEnv() {
+  const env = { ...process.env };
+  env.PATH = SAFE_PATH;
+  if (IS_WINDOWS) env.Path = SAFE_PATH;
+  return env;
+}
+
+function shellInvocation(command) {
+  if (IS_WINDOWS) {
+    const powershell = process.env.SystemRoot
+      ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+      : 'powershell.exe';
+    return { file: powershell, args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command] };
+  }
+  return { file: '/bin/bash', args: ['-lc', `export PATH="${SAFE_PATH}"; ${command}`] };
+}
 
 // processi lunghi (dev server, suite): non stanno in un timeout, vivono oltre la singola chiamata
 const jobs = new Map();
@@ -28,6 +56,8 @@ const DEFAULT_CONFIG = {
   maxReadBytes: 400_000,
   execTimeoutMs: 180_000,
   allowExec: true,
+  // Il bridge resta sul Mac: questo target viene raggiunto tramite SSH e PowerShell.
+  windowsSsh: { host: '100.92.197.74', user: 'zorah', connectTimeoutSec: 10 },
   denyGlobs: ['**/.env', '**/.env.*', '**/id_rsa*', '**/*.pem', '**/auth.json', '**/.ssh/**'],
 };
 
@@ -59,6 +89,15 @@ function resolveInRoot(p) {
   return real;
 }
 
+function psLiteral(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+function encodePowerShell(command) {
+  // -EncodedCommand evita che shell locale, ssh e cmd.exe alterino quoting/newline.
+  return Buffer.from(String(command), 'utf16le').toString('base64');
+}
+
 // ---------- tools ----------
 
 const tools = {
@@ -82,9 +121,10 @@ const tools = {
       if (jobs.has(key)) throw new Error(`Esiste gia un processo "${key}". Fermalo con stop_background o usa un altro nome.`);
       const out = path.join(os.tmpdir(), `devbridge-${key}-${Date.now()}.log`);
       const fd = fs.openSync(out, 'w');
-      const child = spawn('/bin/bash', ['-lc', `export PATH="${SAFE_PATH}"; ${command}`], {
-        cwd: dir, detached: true, stdio: ['ignore', fd, fd],
-        env: { ...process.env, PATH: SAFE_PATH },
+      const shell = shellInvocation(command);
+      const child = spawn(shell.file, shell.args, {
+        cwd: dir, detached: !IS_WINDOWS, stdio: ['ignore', fd, fd],
+        env: commandEnv(),
       });
       child.unref();
       jobs.set(key, { pid: child.pid, log: out, command, cwd: dir, started: Date.now() });
@@ -124,7 +164,11 @@ const tools = {
       if (!name) return [...jobs.entries()].map(([k, j]) => `${k} pid=${j.pid} ${j.command}`).join('\n') || 'nessun processo attivo';
       const j = jobs.get(name);
       if (!j) return `Nessun processo "${name}"`;
-      try { process.kill(-j.pid, 'SIGTERM'); } catch { try { process.kill(j.pid, 'SIGTERM'); } catch {} }
+      if (IS_WINDOWS) {
+        try { await execFileP('taskkill.exe', ['/PID', String(j.pid), '/T', '/F']); } catch {}
+      } else {
+        try { process.kill(-j.pid, 'SIGTERM'); } catch { try { process.kill(j.pid, 'SIGTERM'); } catch {} }
+      }
       jobs.delete(name);
       return `fermato "${name}" (pid ${j.pid})`;
     },
@@ -345,9 +389,10 @@ const tools = {
     handler: async ({ command, cwd, timeout_sec }) => {
       if (!CFG.allowExec) throw new Error('run_command disabilitato nella config.');
       const dir = resolveInRoot(cwd);
-      const env = { ...process.env, PATH: SAFE_PATH };
+      const env = commandEnv();
+      const shell = shellInvocation(command);
       try {
-        const { stdout, stderr } = await execFileP('/bin/bash', ['-lc', `export PATH="${SAFE_PATH}"; ${command}`], {
+        const { stdout, stderr } = await execFileP(shell.file, shell.args, {
           cwd: dir, env, maxBuffer: 8e6,
           timeout: Math.min((timeout_sec ? timeout_sec * 1000 : CFG.execTimeoutMs), 900_000),
         });
@@ -357,6 +402,53 @@ const tools = {
           ? `TIMEOUT dopo ${Math.min((timeout_sec ? timeout_sec : CFG.execTimeoutMs / 1000), 900)}s. Rilancia con timeout_sec piu alto, o avvia in background con run_background.`
           : `exit=${e.code ?? '?'} ${e.message ? '(' + e.message.split('\n')[0].slice(0, 200) + ')' : ''}`;
         return `${why}\n--- stdout\n${(e.stdout || '').slice(-30_000)}\n--- stderr\n${(e.stderr || '').slice(-20_000)}`;
+      }
+    },
+  },
+
+  windows_run_command: {
+    description: 'Esegue PowerShell sul PC Windows configurato, collegandosi via SSH dal Mac. '
+      + 'Il bridge resta sul Mac: usa questo tool per audit hardware/NVIDIA, Ollama, installazione/configurazione '
+      + 'nativa di JCode e benchmark sulla RTX 3090. Non usare la versione browser di JCode e non creare un bridge Windows.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'Comando PowerShell completo da eseguire sul Windows.' },
+        remote_cwd: { type: 'string', description: 'Cartella Windows opzionale, es. C:\\Users\\zorah\\devbridge.' },
+        timeout_sec: { type: 'integer', description: 'Timeout in secondi (default 180, max 900).' },
+      },
+      required: ['command'],
+    },
+    annotations: { title: 'Esegui PowerShell su Windows via Mac', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    handler: async ({ command, remote_cwd, timeout_sec }) => {
+      if (!CFG.allowExec) throw new Error('Esecuzione disabilitata nella config.');
+      const target = CFG.windowsSsh || {};
+      if (!target.host || !target.user) {
+        throw new Error('Target Windows SSH non configurato: servono windowsSsh.host e windowsSsh.user nel config del bridge Mac.');
+      }
+      const remoteScript = remote_cwd
+        ? `Set-Location -LiteralPath ${psLiteral(remote_cwd)}\n${command}`
+        : String(command);
+      const args = [
+        '-T',
+        '-o', 'BatchMode=yes',
+        '-o', `ConnectTimeout=${Number(target.connectTimeoutSec) || 10}`,
+        `${target.user}@${target.host}`,
+        'powershell.exe',
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-EncodedCommand', encodePowerShell(remoteScript),
+      ];
+      const timeoutMs = Math.min((timeout_sec ? timeout_sec * 1000 : CFG.execTimeoutMs), 900_000);
+      try {
+        const { stdout, stderr } = await execFileP('/usr/bin/ssh', args, {
+          env: commandEnv(), maxBuffer: 8e6, timeout: timeoutMs,
+        });
+        return `exit=0\n--- Windows stdout\n${stdout.slice(-40_000)}\n--- Windows stderr\n${stderr.slice(-10_000)}`;
+      } catch (e) {
+        const why = e.killed || e.signal === 'SIGTERM'
+          ? `TIMEOUT dopo ${Math.round(timeoutMs / 1000)}s`
+          : `exit=${e.code ?? '?'} ${e.message ? '(' + e.message.split('\n')[0].slice(0, 200) + ')' : ''}`;
+        return `${why}\n--- Windows stdout\n${(e.stdout || '').slice(-40_000)}\n--- Windows stderr\n${(e.stderr || '').slice(-20_000)}`;
       }
     },
   },
@@ -385,6 +477,11 @@ async function handle(msg) {
   switch (method) {
     case 'initialize':
       CFG = loadConfig();
+      // registra cosa dichiara il client: serve per sapere se supporta elicitation/sampling
+      try {
+        fs.appendFileSync(path.join(os.tmpdir(), 'devbridge-init.log'),
+          new Date().toISOString() + ' ' + JSON.stringify(params) + '\n');
+      } catch {}
       return reply({
         protocolVersion: params?.protocolVersion === '2024-11-05' ? '2024-11-05' : '2025-06-18',
         capabilities: { tools: { listChanged: false } },
@@ -393,6 +490,8 @@ async function handle(msg) {
           'devbridge da accesso ai file locali dei progetti. list_roots per vedere le cartelle, '
           + 'list_dir/read_file/search per orientarti, edit_file/write_file per modificare, '
           + 'run_command per test e build, run_background per cio che non finisce da solo. '
+          + 'Per il PC Windows e la RTX 3090 usa windows_run_command: esegue PowerShell sul Windows via SSH dal Mac. '
+          + 'JCode va configurato nativo/local sul Windows, mai nella versione browser. '
           + 'Percorsi sempre assoluti.\n\n'
           + 'LAVORO SU PIU MESSAGGI. Non ricordi i turni precedenti, ma il piano su disco si. '
           + 'Chiama SEMPRE task_status come prima cosa: ti dice a che punto eri. '
@@ -416,8 +515,14 @@ async function handle(msg) {
     case 'prompts/list':
       return reply({ prompts: [] });
     case 'tools/call': {
-      const t = tools[params?.name];
-      if (!t) return fail(`Tool sconosciuto: ${params?.name}`);
+      const requestedName = params?.name;
+      // Alcuni connector MCP premettono il namespace dell'app al nome dell'azione.
+      // Il server espone invece le azioni senza namespace: accettiamo entrambe le forme.
+      const name = typeof requestedName === 'string' && requestedName.startsWith('dev_bridge.')
+        ? requestedName.slice('dev_bridge.'.length)
+        : requestedName;
+      const t = tools[name];
+      if (!t) return fail(`Tool sconosciuto: ${requestedName}`);
       try {
         const text = await t.handler(params.arguments || {});
         return reply({ content: [{ type: 'text', text: String(text) }], isError: false });

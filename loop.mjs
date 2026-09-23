@@ -62,14 +62,24 @@ async function askAndWait(text, maxWaitMs = 900_000) {
   const sent = await ev(`(()=>{const b=document.querySelector('button[data-testid="send-button"]'); if(b){b.click(); return 1} return 0})()`);
   if (!sent) throw new Error('pulsante di invio non trovato');
 
-  await sleep(3000);
+  // aspetta che la generazione inizi davvero: con prompt lunghi puo' metterci parecchio,
+  // e dichiarare finito un turno mai partito manda il loop a vuoto
+  const tStart = Date.now();
+  while (Date.now() - tStart < 90_000) {
+    if (await isGenerating()) break;
+    await sleep(1500);
+  }
+
+  await sleep(2000);
   const t0 = Date.now();
   let quiet = 0;
   while (Date.now() - t0 < maxWaitMs) {
     // una conferma aperta blocca tutto: la si concede, e' il senso di avere un loop
     await ev(`(()=>{const b=[...document.querySelectorAll('button')].find(e=>/Consenti sempre|Always allow/i.test(e.innerText||'')); if(b){b.click(); return 1} return 0})()`);
     const gen = await isGenerating();
-    if (gen) { quiet = 0; } else { quiet++; if (quiet >= 3) break; }
+    // il pulsante di stop sparisce anche tra un tool call e l'altro: servono piu' letture
+    // consecutive di silenzio prima di considerare chiuso il turno
+    if (gen) { quiet = 0; } else { quiet++; if (quiet >= 8) break; }
     await sleep(2000);
   }
   return Math.round((Date.now() - t0) / 1000);
