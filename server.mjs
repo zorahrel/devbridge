@@ -92,9 +92,29 @@ const roots = () => {
   return REMOTE ? [...r, SANDBOX_ROOT] : r;
 };
 
+/**
+ * The real path of `abs`, even when it does not exist yet: resolve the deepest existing
+ * ancestor and append the rest. Resolving only paths that exist let a remote caller write
+ * THROUGH a symlink it had planted in the sandbox (link -> ~/Projects/topics-app, then
+ * write_file link/NEW): the check saw a non-existent path under the sandbox and allowed
+ * it, the write followed the link into prod. Found on 23/09 before shipping.
+ */
+function realPathDeep(abs) {
+  let head = abs;
+  const tail = [];
+  while (!fs.existsSync(head)) {
+    const parent = path.dirname(head);
+    if (parent === head) break;
+    tail.unshift(path.basename(head));
+    head = parent;
+  }
+  const base = fs.existsSync(head) ? fs.realpathSync(head) : head;
+  return tail.length ? path.join(base, ...tail) : base;
+}
+
 function resolveInRoot(p) {
   const abs = path.resolve(p.replace(/^~/, os.homedir()));
-  const real = fs.existsSync(abs) ? fs.realpathSync(abs) : abs;
+  const real = realPathDeep(abs);
   const ok = roots().some(r => {
     const rr = fs.existsSync(r) ? fs.realpathSync(r) : r;
     return real === rr || real.startsWith(rr + path.sep);

@@ -109,6 +109,15 @@ try {
   const push = await call(R, bearer, 'run_command', { command: 'git -c alias.p=push p --dry-run origin HEAD:refs/heads/e2e-probe; echo EXIT=$?', cwd: path.join(HOME, 'Projects', 'topics-app') });
   check('remote: push via alias impossibile', /EXIT=[1-9]/.test(push) && /not permitted|unable to fork|cannot exec/i.test(push), push.slice(-160));
 
+  // A symlink planted in the sandbox must not become a door: the write path is resolved
+  // through the deepest existing ancestor, so link/NEW lands on the link's target.
+  const esc = path.join(SANDBOX, 'e2e-esc');
+  fs.rmSync(esc, { recursive: true, force: true }); fs.mkdirSync(esc, { recursive: true });
+  fs.symlinkSync(path.join(HOME, 'Projects', 'topics-app'), path.join(esc, 'link'));
+  const viaLink = await call(R, bearer, 'write_file', { path: path.join(esc, 'link', 'E2E_ESCAPE', 'x.txt'), content: 'x' });
+  check('remote: symlink nella sandbox non porta fuori', /solo in/.test(viaLink) && !fs.existsSync(path.join(HOME, 'Projects', 'topics-app', 'E2E_ESCAPE')), viaLink.slice(0, 120));
+  fs.rmSync(esc, { recursive: true, force: true });
+
   const wt = path.join(SANDBOX, 'e2e-wt');
   fs.rmSync(wt, { recursive: true, force: true });
   const clone = await call(R, bearer, 'run_command', { command: `git clone -q --depth 1 file://${ROOT} ${wt} && cd ${wt} && echo ok > e2e.txt && git add e2e.txt && git -c user.name=e2e -c user.email=e2e@x commit -qm e2e && git log --oneline -1`, cwd: SANDBOX });
@@ -122,7 +131,7 @@ try {
   check('local: run_command normale', /local-ok/.test(lw));
 } finally {
   proc.kill();
-  try { fs.rmSync(path.join(HOME, 'Projects', 'topics-app', 'E2E_PROBE'), { force: true }); fs.rmSync(path.join(HOME, 'Projects', 'topics-app', 'E2E_PROBE2'), { force: true }); } catch {}
+  try { fs.rmSync(path.join(HOME, 'Projects', 'topics-app', 'E2E_PROBE'), { force: true }); fs.rmSync(path.join(HOME, 'Projects', 'topics-app', 'E2E_PROBE2'), { force: true }); fs.rmSync(path.join(HOME, 'Projects', 'topics-app', 'E2E_ESCAPE'), { recursive: true, force: true }); } catch {}
 }
 console.log(`${passed} pass, ${failed} fail`);
 if (/token: [A-Za-z0-9_-]{20,}/.test(stderr) || stderr.includes(TOKEN)) { console.log('FAIL il token e finito nei log'); failed++; }
