@@ -73,6 +73,14 @@ function resolveWritable(p) {
 const jobs = new Map();
 let jobSeq = 1;
 
+// The job log is opened by THIS process, which runs outside the sandbox. The caller's job
+// name used to be pasted into its path: `../../Library/LaunchAgents/x` wrote a file with
+// the command's output anywhere the owner can write. The name is now a label only, and
+// logs live in a private 0700 directory under a server-chosen file name.
+const JOB_LOG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'devbridge-jobs-'));
+fs.chmodSync(JOB_LOG_DIR, 0o700);
+const safeJobName = (s) => String(s).replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_').slice(0, 64);
+
 const CONFIG_PATH = process.env.DEVBRIDGE_CONFIG
   || path.join(os.homedir(), '.config', 'devbridge', 'config.json');
 
@@ -171,9 +179,9 @@ const tools = {
     },
     handler: async ({ command, cwd, name }) => {
       const dir = resolveInRoot(cwd);
-      const key = name || 'job' + (jobSeq++);
+      const key = name ? safeJobName(name) : 'job' + (jobSeq++);
       if (jobs.has(key)) throw new Error(`Esiste gia un processo "${key}". Fermalo con stop_background o usa un altro nome.`);
-      const out = path.join(os.tmpdir(), `devbridge-${key}-${Date.now()}.log`);
+      const out = path.join(JOB_LOG_DIR, `${jobSeq++}-${Date.now()}.log`);
       const fd = fs.openSync(out, 'w');
       const shell = shellInvocation(command);
       const child = spawn(shell.file, shell.args, {

@@ -175,6 +175,20 @@ try {
   if (prefWritten) try { execFileSync('/usr/bin/defaults', ['delete', dom], { stdio: 'pipe' }); } catch {}
   check('remote: niente scritture nelle preferenze (cfprefsd)', !prefWritten);
 
+  // The job log is opened by the unsandboxed server, and the job name used to go into its
+  // path: `../` in the name created a file anywhere the owner can write, with the command's
+  // output as content. The old path was <tmpdir>/devbridge-<name>-<ms>.log, so the name
+  // `x/../../<dir>/pwn` lands as <dir>/pwn-<ms>.log once `devbridge-x` exists.
+  const escDir = fs.mkdtempSync(path.join(HOME, '.devbridge-e2e-esc-'));
+  fs.mkdirSync(path.join(os.tmpdir(), 'devbridge-x'), { recursive: true });
+  const rel = 'x/' + path.relative(path.join(os.tmpdir(), 'devbridge-x'), path.join(escDir, 'pwn'));
+  const bg = await call(R, bearer, 'run_background', { command: 'echo PAYLOAD', cwd: SANDBOX, name: rel });
+  const escaped = fs.readdirSync(escDir);
+  fs.rmSync(escDir, { recursive: true, force: true });
+  fs.rmSync(path.join(os.tmpdir(), 'devbridge-x'), { recursive: true, force: true });
+  check('remote: nome del job non esce da tmpdir', escaped.length === 0 && /avviato/.test(bg), `${escaped.join(',')} ${bg.slice(0, 160)}`);
+  await call(R, bearer, 'stop_background', { name: rel }).catch(() => {});
+
   // ---- local keeps full powers
   const lw = await call(L, `Bearer ${TOKEN}`, 'run_command', { command: 'echo local-ok', cwd: path.join(HOME, 'Projects') });
   check('local: run_command normale', /local-ok/.test(lw));
