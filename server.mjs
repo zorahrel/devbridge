@@ -10,7 +10,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { taskTools, load as loadTask } from './tools-task.mjs';
-import { sandboxed, remoteMayWrite, SANDBOX_ROOT } from './sandbox.mjs';
+import { sandboxed, sandboxEnv, remoteMayWrite, SANDBOX_ROOT } from './sandbox.mjs';
 
 // Set by http.mjs on the child that serves the public tunnel. In remote mode every
 // command runs inside the kernel sandbox and file writes are allowed only under
@@ -34,6 +34,9 @@ const SAFE_PATH = IS_WINDOWS
   : `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME || os.homedir()}/.bun/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
 
 function commandEnv() {
+  // Remote: nothing inherited. The parent env carries SSH_AUTH_SOCK and whatever launchd
+  // gave the bridge; a sandboxed command has no business seeing either.
+  if (REMOTE) return sandboxEnv(SAFE_PATH);
   const env = { ...process.env };
   env.PATH = SAFE_PATH;
   if (IS_WINDOWS) env.Path = SAFE_PATH;
@@ -48,7 +51,7 @@ function shellInvocation(command) {
     return { file: powershell, args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command] };
   }
   const bash = { file: '/bin/bash', args: ['-lc', `export PATH="${SAFE_PATH}"; ${command}`] };
-  return REMOTE ? sandboxed(bash.file, bash.args) : bash;
+  return REMOTE ? sandboxed(bash.file, bash.args, configRoots()) : bash;
 }
 
 /** Resolve a path the caller wants to WRITE: in remote mode only inside the sandbox. */
@@ -87,6 +90,12 @@ function loadConfig() {
 }
 
 let CFG = loadConfig();
+/** The configured project roots, real paths: what a remote command may READ. */
+function configRoots() {
+  return CFG.roots
+    .map(x => path.resolve(x.replace(/^~/, os.homedir())))
+    .map(r => (fs.existsSync(r) ? fs.realpathSync(r) : r));
+}
 const roots = () => {
   const r = CFG.roots.map(x => path.resolve(x.replace(/^~/, os.homedir())));
   return REMOTE ? [...r, SANDBOX_ROOT] : r;
@@ -404,8 +413,9 @@ const tools = {
       const dir = resolveInRoot(cwd);
       if (args.some(a => /^(push|remote)$/.test(a))) throw new Error('push/remote non consentiti da qui: lo fa l\'umano.');
       try {
-        const g = REMOTE ? sandboxed('/usr/bin/git', args) : { file: '/usr/bin/git', args };
-        const { stdout, stderr } = await execFileP(g.file, g.args, { cwd: dir, maxBuffer: 8e6, timeout: 120_000 });
+        const g = REMOTE ? sandboxed('/usr/bin/git', args, configRoots()) : { file: '/usr/bin/git', args };
+        const opts = { cwd: dir, maxBuffer: 8e6, timeout: 120_000, ...(REMOTE ? { env: commandEnv() } : {}) };
+        const { stdout, stderr } = await execFileP(g.file, g.args, opts);
         return (stdout + stderr).slice(0, 60_000) || '(nessun output)';
       } catch (e) {
         return `exit=${e.code}\n${(e.stdout || '') + (e.stderr || '')}`.slice(0, 60_000);

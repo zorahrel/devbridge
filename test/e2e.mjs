@@ -21,6 +21,8 @@ const ROOT = path.dirname(HERE);
 const HOME = os.homedir();
 const TOKEN = fs.readFileSync(path.join(HOME, '.config', 'devbridge', 'token'), 'utf8').trim();
 const SANDBOX = path.join(HOME, 'devbridge-sandbox');
+// A small real repo under ~/Projects (a configured root) to clone from the sandbox.
+const PROD = path.join(HOME, 'Projects', 'topics-app');
 
 const freePort = () => new Promise((r) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
 const L = await freePort(), R = await freePort();
@@ -120,11 +122,36 @@ try {
 
   const wt = path.join(SANDBOX, 'e2e-wt');
   fs.rmSync(wt, { recursive: true, force: true });
-  const clone = await call(R, bearer, 'run_command', { command: `git clone -q --depth 1 file://${ROOT} ${wt} && cd ${wt} && echo ok > e2e.txt && git add e2e.txt && git -c user.name=e2e -c user.email=e2e@x commit -qm e2e && git log --oneline -1`, cwd: SANDBOX });
+  // The source must sit under a configured root: the sandbox reads nothing else in $HOME.
+  const clone = await call(R, bearer, 'run_command', { command: `git clone -q --depth 1 file://${PROD} ${wt} && cd ${wt} && echo ok > e2e.txt && git add e2e.txt && git -c user.name=e2e -c user.email=e2e@x commit -qm e2e && git log --oneline -1`, cwd: SANDBOX });
   check('remote: clone + commit nella sandbox', /exit=0/.test(clone) && /e2e/.test(clone), clone.slice(0, 200));
   const w = await call(R, bearer, 'write_file', { path: path.join(wt, 'nota.md'), content: 'ciao' });
   check('remote: write_file nella sandbox', /scritto|ok|byte/i.test(w) || fs.existsSync(path.join(wt, 'nota.md')), w.slice(0, 120));
   fs.rmSync(wt, { recursive: true, force: true });
+
+  // ---- escapes found by the adversarial check of 23/09: one assertion each.
+  // The first profile allowed everything outside $HOME; these would all have passed.
+  const sh = (command) => call(R, bearer, 'run_command', { command, cwd: SANDBOX });
+  const out = (s) => (s.split('--- stdout')[1] || '').split('--- stderr')[0];
+  const probes = ['/opt/homebrew/bin/devbridge-e2e-probe', '/Users/Shared/devbridge-e2e-probe', '/private/tmp/devbridge-e2e-probe'];
+  await sh(probes.map((p) => `echo x > ${p}`).join('; ') + '; true');
+  check('remote: niente scritture in /opt/homebrew/bin (PATH del lato locale)', !fs.existsSync(probes[0]));
+  check('remote: niente scritture in /Users/Shared', !fs.existsSync(probes[1]));
+  check('remote: niente scritture in /private/tmp', !fs.existsSync(probes[2]));
+  const reads = await sh('for f in ~/.zsh_history ~/.gitconfig ~/.topics/daemon-state.json; do head -c1 "$f" >/dev/null 2>&1 && echo "READ $f"; done; true');
+  check('remote: file fuori dai root illeggibili', !/READ /.test(out(reads)), reads.slice(0, 200));
+  check('remote: env senza SSH_AUTH_SOCK', !/SSH_AUTH_SOCK/.test(out(await sh('env'))));
+  const loop = await sh(`curl -s -m3 -o /dev/null -w "v4=%{http_code} " http://127.0.0.1:${L}/mcp; curl -s -m3 -o /dev/null -w "v6=%{http_code}" "http://[::1]:${L}/mcp"; true`);
+  check('remote: loopback irraggiungibile (servizi locali)', /v4=000 v6=000/.test(out(loop)), out(loop));
+  const agent = await sh(`python3 -c "import socket;s=socket.socket(socket.AF_UNIX);s.connect('${process.env.SSH_AUTH_SOCK || '/nonexistent'}');print('AGENT_CONNECTED')"; true`);
+  check('remote: socket ssh-agent irraggiungibile', !/AGENT_CONNECTED/.test(out(agent)));
+  const ae = await sh('cp /usr/bin/osascript "$TMPDIR/oa"; "$TMPDIR/oa" -e \'tell application "Finder" to get name\' 2>/dev/null && echo AE_OK; pbpaste 2>/dev/null | head -c1 | grep -q . && echo PASTE_OK; true');
+  check('remote: niente Apple Events ne appunti', !/AE_OK|PASTE_OK/.test(out(ae)), out(ae).slice(0, 200));
+  const kc = await sh('cp /usr/bin/security "$TMPDIR/sec"; "$TMPDIR/sec" find-generic-password -s devbridge >/dev/null 2>&1 && echo KC_OK; printf "protocol=https\\nhost=github.com\\n\\n" | git credential fill 2>/dev/null | grep -q "^password=" && echo CRED_OK; true');
+  check('remote: niente Keychain ne credential helper', !/KC_OK|CRED_OK/.test(out(kc)), out(kc).slice(0, 200));
+  check('remote: niente segnali a processi fuori sandbox', !/SIGNAL_OK/.test(out(await sh(`kill -0 ${process.pid} 2>/dev/null && echo SIGNAL_OK; true`))));
+  const net = await sh('curl -s -m10 -o /dev/null -w "%{http_code}" https://registry.npmjs.org/left-pad');
+  check('remote: https verso internet funziona', /200/.test(out(net)), net.slice(0, 200));
 
   // ---- local keeps full powers
   const lw = await call(L, `Bearer ${TOKEN}`, 'run_command', { command: 'echo local-ok', cwd: path.join(HOME, 'Projects') });

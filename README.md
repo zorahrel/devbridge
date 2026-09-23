@@ -81,11 +81,17 @@ The model is a guest on your machine, not the owner.
   resolved before the check.
 - **Secrets are never readable**, not even inside an allowed root: `.env*`, `*.pem`, `id_rsa*`,
   `auth.json`, anything under `.ssh/`.
-- **Remote calls run in a kernel sandbox** (`sandbox.mjs`, macOS `sandbox-exec`): writes only
-  under `~/devbridge-sandbox`, no `ssh`, `gh`, `security` or git remote helpers, no reading
-  `~/.ssh`, the Keychain or the bridge's own secrets. A rule inside the git tool used to forbid
-  push; `run_command` is bash, and `git -c alias.p=push p` walked straight past it. The kernel
-  does not care how the command is spelled.
+- **Remote calls run in a kernel sandbox** (`sandbox.mjs`, macOS `sandbox-exec`) built from
+  allow-lists, not deny-lists: writes only under `~/devbridge-sandbox`; reads under `$HOME` only
+  in the configured roots and the toolchains, never `.env`/keys even there; network out only on
+  80/443, never loopback or local sockets (ssh-agent, OpenClaw, Topics); no Keychain, pasteboard,
+  Apple Events or LaunchServices; no signals outside the sandbox; an empty environment. A rule
+  inside the git tool used to forbid push; `run_command` is bash, and `git -c alias.p=push p`
+  walked straight past it. The kernel does not care how the command is spelled.
+- **Why allow-lists.** The first profile denied writes under `$HOME` and allowed the rest. An
+  adversarial check wrote into `/opt/homebrew/bin`, first in the PATH of the unsandboxed local
+  side: one planted `git` and the next local call runs it with full powers. `test/e2e.mjs` has
+  one assertion per escape found that day; with the old profile 9 of them go red.
 - **No secret in any URL.** The token used to travel in the path because the connector form had
   no header field: every proxy log kept a copy. Local takes a header, remote takes OAuth.
 - **Admin token**, 0600 on disk, never printed. OAuth tokens are stored hashed, expire in an hour,
@@ -136,9 +142,11 @@ response, and a file truncated halfway costs more than two extra calls.
 - **The remote regime needs a named tunnel and a domain.** A `trycloudflare` quick tunnel rotates
   its hostname on every boot, and OAuth ties the tokens to the address.
 - **A turn is slow.** Two to five minutes of real work each. The loop is autonomous, not fast.
-- **The sandbox is macOS-only** (`sandbox-exec`) and is not a VM: outbound network stays open so
+- **The sandbox is macOS-only** (`sandbox-exec`) and is not a VM: https out stays open so
   installs work, but without your credentials it reaches only what the public internet does.
-  Locally there is no sandbox at all: the local regime is you.
+  Hosts on your LAN or tailnet that listen on 80/443 are reachable too (the profile cannot tell
+  them apart by address): keep those behind auth. Locally there is no sandbox at all: the local
+  regime is you.
 
 ## How it works
 

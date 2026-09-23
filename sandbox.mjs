@@ -6,85 +6,137 @@
 // but run_command is bash: `git -c alias.p=push p` went straight through. A rule the
 // caller can route around is not a fence.
 //
-// THE FENCE. Remote calls run under macOS sandbox-exec with a profile that:
-//   - denies every file write under $HOME except the sandbox root (~/devbridge-sandbox)
-//     and the usual caches/temp a toolchain needs;
-//   - denies reading ~/.ssh, the Keychain files, and the bridge's own secrets;
-//   - denies running ssh, scp, gh, security and the git remote helpers, so nothing can
-//     leave the machine with the owner's identity (no push, no clone of private repos
-//     with the owner's keys). Plain outbound network stays open: installs need it, and
-//     without the owner's credentials it reaches only what the public internet does.
-// Read access to the project roots stays: ChatGPT can study the code, clone it into the
-// sandbox with `git worktree add`/`git clone`, and work there.
-//
-// The kernel enforces this, whatever the command does. Verified on macOS 26.2.
+// THE FENCE. Remote calls run under macOS sandbox-exec. The first version started from
+// `(allow default)` and denied writes only under $HOME: the adversarial check of 23/09
+// wrote into /opt/homebrew/bin, which is first in the PATH of the unsandboxed local side,
+// so one planted binary became full powers. It also found secrets readable outside a
+// short deny list, the ssh-agent socket reachable, `open`/`osascript` running things
+// outside the sandbox, and loopback services (OpenClaw, Topics with the token read from
+// ~/.topics) one curl away. So every axis is now an allow-list:
+//   - writes: nowhere but SANDBOX_ROOT (plus /dev/null and friends);
+//   - reads under $HOME: only the project roots, the sandbox and the toolchains; secrets
+//     by name (.env, .npmrc, keys) stay unreadable even inside the roots;
+//   - network: outbound tcp 80/443 and DNS only, never loopback, never unix sockets
+//     (ssh-agent, jcode, Docker): installs and git fetch over https work, local services
+//     and ssh do not;
+//   - mach services: an allow-list of what libc, DNS and TLS need. The Keychain
+//     (securityd), the pasteboard, Apple Events and LaunchServices are not on it, so the
+//     git credential helper, `security`, `pbpaste`, `osascript` and `open` all fail;
+//   - signals: only to processes inside the same sandbox.
+// Checked on macOS 26.2 by test/e2e.mjs, one assertion per escape above.
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 
 export const SANDBOX_ROOT = path.join(os.homedir(), 'devbridge-sandbox');
+/** HOME and TMPDIR of a remote command: caches and dotfiles land in the sandbox. */
+export const SANDBOX_HOME = path.join(SANDBOX_ROOT, '.home');
+export const SANDBOX_TMP = path.join(SANDBOX_ROOT, '.tmp');
 
 const HOME = os.homedir();
 
-/** Writes a remote caller needs besides the sandbox: temp dirs and package caches. */
-const EXTRA_WRITABLE = [
-  '/private/tmp', '/private/var/folders', '/dev',
-  path.join(HOME, '.npm'), path.join(HOME, '.bun', 'install', 'cache'),
-  path.join(HOME, 'Library', 'Caches'), path.join(HOME, '.cache'),
-  path.join(HOME, 'Library', 'pnpm'), path.join(HOME, '.local', 'share', 'pnpm'),
-];
+/** Readable under $HOME besides the project roots: runtimes a build may need. */
+const TOOLCHAINS = ['.bun', '.nvm', '.cargo', '.rustup', '.deno', 'Library/pnpm', '.local/share/pnpm']
+  .map((p) => path.join(HOME, p));
 
-/** Never readable from a remote call, even inside the project roots. */
-const SECRET_READ = [
-  path.join(HOME, '.ssh'),
-  path.join(HOME, 'Library', 'Keychains'),
-  path.join(HOME, '.config', 'devbridge'),
-  path.join(HOME, '.config', 'gh'),
-  path.join(HOME, '.aws'),
-  path.join(HOME, '.gnupg'),
-  path.join(HOME, '.cloudflared'),
-  path.join(HOME, '.mcp-auth'),
-];
+/** Never readable, even inside a project root (same list the file tools refuse). */
+const SECRET_NAMES = String.raw`/(\.env(\.[^/]*)?|\.npmrc|\.git-credentials|credentials(\.toml)?|auth\.json|id_[a-z0-9]+|[^/]*\.pem|[^/]*\.p12|[^/]*\.key)$`;
 
-/** Programs that carry the owner's identity off the machine. */
+/** Programs that carry the owner's identity off the machine. Belt and braces: the mach
+ *  and socket rules already cut them off, and a renamed copy would dodge a path rule. */
 const DENY_EXEC = [
-  '/usr/bin/ssh', '/usr/bin/scp', '/usr/bin/sftp',
+  '/usr/bin/ssh', '/usr/bin/scp', '/usr/bin/sftp', '/usr/bin/ssh-add',
   '/opt/homebrew/bin/gh', '/usr/local/bin/gh',
-  '/usr/bin/security',
+  '/usr/bin/security', '/usr/bin/osascript', '/usr/bin/open', '/bin/launchctl',
   '/opt/homebrew/bin/cloudflared',
 ];
 
-const q = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+/** What libc, DNS, TLS and preferences need. Anything else is refused. */
+const MACH_ALLOW = [
+  'com.apple.system.opendirectoryd.libinfo', 'com.apple.system.opendirectoryd.membership',
+  'com.apple.system.notification_center', 'com.apple.system.logger', 'com.apple.logd',
+  'com.apple.diagnosticd', 'com.apple.analyticsd', 'com.apple.dnssd.service',
+  'com.apple.mDNSResponder', 'com.apple.SystemConfiguration.configd',
+  'com.apple.SystemConfiguration.DNSConfiguration', 'com.apple.networkd',
+  'com.apple.nesessionmanager.flow-divert-token', 'com.apple.trustd', 'com.apple.trustd.agent',
+  'com.apple.ocspd', 'com.apple.cfprefsd.daemon', 'com.apple.cfprefsd.agent',
+  'com.apple.CoreServices.coreservicesd', 'com.apple.dyld.closured',
+];
 
-export function profile() {
+const q = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** The per-user temp dir: /usr/bin/git is an xcrun shim that caches its lookup there. */
+function userTempDir() {
+  try {
+    return fs.realpathSync(execFileSync('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'], { encoding: 'utf8' }).trim());
+  } catch { return null; }
+}
+
+/** @param {string[]} readRoots project roots a remote caller may read (config `roots`). */
+export function profile(readRoots = []) {
+  const readable = [SANDBOX_ROOT, ...readRoots, ...TOOLCHAINS];
+  const utmp = userTempDir();
   const lines = [
     '(version 1)',
     '(allow default)',
-    `(deny file-write* (subpath ${q(HOME)}))`,
-    `(allow file-write* (subpath ${q(SANDBOX_ROOT)}))`,
-    ...EXTRA_WRITABLE.map((p) => `(allow file-write* (subpath ${q(p)}))`),
-    ...SECRET_READ.map((p) => `(deny file-read* (subpath ${q(p)}))`),
+    // writes: the sandbox and nothing else
+    '(deny file-write*)',
+    `(allow file-write* (subpath ${q(SANDBOX_ROOT)}) (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper") (regex #"^/dev/fd/"))`,
+    // reads under $HOME: allow-list
+    `(deny file-read-data (subpath ${q(HOME)}))`,
+    `(allow file-read-data (literal ${q(HOME)}) ${readable.map((p) => `(subpath ${q(p)})`).join(' ')})`,
+    // anchored to $HOME: a bare *.pem rule also hid /etc/ssl/cert.pem and broke TLS
+    `(deny file-read-data (regex #"^${escRe(HOME)}/.*${SECRET_NAMES}"))`,
+    // the user temp dir holds other apps' sockets and scratch: closed, except the
+    // xcrun cache /usr/bin/git needs (later rules win in SBPL)
+    ...(utmp ? [
+      `(deny file-read-data (subpath ${q(utmp)}))`,
+      `(allow file-write* file-read-data (regex #"^${escRe(utmp)}/xcrun_db"))`,
+    ] : []),
+    // network: https/http and DNS out, never loopback, never local sockets
+    '(deny network-outbound)',
+    '(allow network-outbound (remote tcp "*:443") (remote tcp "*:80") (remote udp "*:53") (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))',
+    '(deny network-outbound (remote ip "localhost:*"))',
+    // mach services: allow-list
+    '(deny mach-lookup)',
+    `(allow mach-lookup ${MACH_ALLOW.map((n) => `(global-name ${q(n)})`).join(' ')})`,
+    // no signals to anything the sandbox did not start
+    '(deny signal)',
+    '(allow signal (target same-sandbox))',
     ...DENY_EXEC.map((p) => `(deny process-exec (literal ${q(p)}))`),
-    // git push/fetch over ssh need ssh (denied above); over https they need the
-    // credential helper, which reads the Keychain (denied above). Belt and braces:
     '(deny process-exec (regex #"/git-remote-(https?|ssh)$"))',
   ];
   return lines.join('\n') + '\n';
 }
 
 let profilePath = null;
-function ensureProfile() {
-  if (profilePath && fs.existsSync(profilePath)) return profilePath;
-  fs.mkdirSync(SANDBOX_ROOT, { recursive: true });
+let profileKey = null;
+function ensureProfile(readRoots) {
+  const key = JSON.stringify(readRoots);
+  if (profilePath && profileKey === key && fs.existsSync(profilePath)) return profilePath;
+  for (const d of [SANDBOX_ROOT, SANDBOX_HOME, SANDBOX_TMP]) fs.mkdirSync(d, { recursive: true });
+  // The profile lives outside the sandbox: a remote command must not be able to rewrite it.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devbridge-sb-'));
   profilePath = path.join(dir, 'remote.sb');
-  fs.writeFileSync(profilePath, profile(), { mode: 0o600 });
+  profileKey = key;
+  fs.writeFileSync(profilePath, profile(readRoots), { mode: 0o600 });
   return profilePath;
 }
 
 /** Wrap an argv so it runs inside the remote sandbox. */
-export function sandboxed(file, args) {
-  return { file: '/usr/bin/sandbox-exec', args: ['-f', ensureProfile(), file, ...args] };
+export function sandboxed(file, args, readRoots = []) {
+  return { file: '/usr/bin/sandbox-exec', args: ['-f', ensureProfile(readRoots), file, ...args] };
+}
+
+/** Environment of a remote command: nothing inherited (no SSH_AUTH_SOCK, no tokens). */
+export function sandboxEnv(pathValue) {
+  return {
+    PATH: pathValue, HOME: SANDBOX_HOME, TMPDIR: SANDBOX_TMP + path.sep,
+    LANG: process.env.LANG || 'en_US.UTF-8', TERM: 'dumb',
+    GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1',
+  };
 }
 
 /** True when a path may be WRITTEN by a remote caller (file tools, not only shell). */
