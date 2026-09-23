@@ -166,6 +166,15 @@ try {
   fs.rmSync(secretDir, { recursive: true, force: true });
   check('remote: secrets.json e service account illeggibili nei root', !/SECRET_E2E/.test(out(sec)));
 
+  // Third check of 23/09: cfprefsd writes ~/Library/Preferences on the caller's behalf,
+  // outside any file rule. A preference domain is config other apps load at launch.
+  const dom = `com.devbridge.e2eprobe${process.pid}`;
+  await sh(`defaults write ${dom} x 1 2>/dev/null; true`);
+  let prefWritten = false;
+  try { execFileSync('/usr/bin/defaults', ['read', dom, 'x'], { stdio: 'pipe' }); prefWritten = true; } catch {}
+  if (prefWritten) try { execFileSync('/usr/bin/defaults', ['delete', dom], { stdio: 'pipe' }); } catch {}
+  check('remote: niente scritture nelle preferenze (cfprefsd)', !prefWritten);
+
   // ---- local keeps full powers
   const lw = await call(L, `Bearer ${TOKEN}`, 'run_command', { command: 'echo local-ok', cwd: path.join(HOME, 'Projects') });
   check('local: run_command normale', /local-ok/.test(lw));

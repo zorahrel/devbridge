@@ -52,16 +52,15 @@ const DENY_EXEC = [
   '/opt/homebrew/bin/cloudflared',
 ];
 
-/** What libc, DNS, TLS and preferences need. Anything else is refused. */
+/** What libc, DNS and TLS need, measured: git, node, bun, python, curl and npm install all
+ *  work with exactly these. Anything else is refused. Left out on purpose: cfprefsd (it
+ *  writes ~/Library/Preferences for the caller, so `defaults write` reached the owner's
+ *  real preferences), coreservicesd/LaunchServices, notification_center, the pasteboard,
+ *  Apple Events and securityd. */
 const MACH_ALLOW = [
-  'com.apple.system.opendirectoryd.libinfo', 'com.apple.system.opendirectoryd.membership',
-  'com.apple.system.notification_center', 'com.apple.system.logger', 'com.apple.logd',
-  'com.apple.diagnosticd', 'com.apple.analyticsd', 'com.apple.dnssd.service',
-  'com.apple.mDNSResponder', 'com.apple.SystemConfiguration.configd',
-  'com.apple.SystemConfiguration.DNSConfiguration', 'com.apple.networkd',
-  'com.apple.nesessionmanager.flow-divert-token', 'com.apple.trustd', 'com.apple.trustd.agent',
-  'com.apple.ocspd', 'com.apple.cfprefsd.daemon', 'com.apple.cfprefsd.agent',
-  'com.apple.CoreServices.coreservicesd', 'com.apple.dyld.closured',
+  'com.apple.system.opendirectoryd.libinfo', 'com.apple.dnssd.service', 'com.apple.mDNSResponder',
+  'com.apple.SystemConfiguration.configd', 'com.apple.SystemConfiguration.DNSConfiguration',
+  'com.apple.trustd', 'com.apple.trustd.agent',
 ];
 
 const q = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
